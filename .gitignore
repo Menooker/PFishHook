@@ -1,0 +1,5 @@
+*.o
+bin/*
+include/*
+*.a
+*.s
