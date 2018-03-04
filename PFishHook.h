@@ -6,6 +6,8 @@ enum HookStatus
 	FHMprotectFail,
 	FHAllocFailed,
 	FHPatchFailed,
+	FHTooManyPatches,
+	FHUnrecognizedRIP,
 };
 
 extern "C" HookStatus HookIt(void* oldfunc, void** poutold, void* newfunc);

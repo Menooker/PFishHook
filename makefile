@@ -28,6 +28,8 @@ header: PFishHook.h
 	cp $(PWD_DIR)/PFishHook.h $(OUT_INC_DIR)/PFishHook.h
 
 
+test: hooktest.o lib
+	g++ hooktest.o ${OUT_DIR}/libPFishHook.a -L$(LIBPATH)  -lZydis -o hooktest
 
 clean:
 	rm -f *.o
