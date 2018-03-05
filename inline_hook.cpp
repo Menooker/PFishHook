@@ -7,6 +7,7 @@
 #include<fcntl.h>
 #include <limits.h>
 #include "PFishHook.h"
+#include <math.h>
 
 
 static size_t PageSize2= 0;
@@ -80,23 +81,86 @@ int GetJmpLen()
 
 #define ALIGN_SIZE 8
 #define ALLOC_SIZE (4096*2)
+struct MemChunk
+{
+	size_t allocated;
+	MemChunk* next;
+	char buffer[0];
+};
+#define ALLOC_AVAILABLE (ALLOC_SIZE-sizeof(MemChunk))
 //#define mmap_bypass mmap
 
+
+inline size_t AddressDiff(void* a,void* b)
+{
+	uintptr_t chunkaddr = (uintptr_t)a;
+	uintptr_t laddr = (uintptr_t)b;
+	size_t diff;
+	if (chunkaddr > laddr)
+		diff = chunkaddr - laddr;
+	else
+		diff = laddr - chunkaddr;
+	return diff;
+}
+
+static MemChunk * FuncBuffer = nullptr;
 /*
 Alloc the "jump space" for old function head
 */
-static char* AllocFunc(size_t sz)
+static char* AllocFunc(size_t sz,void* addr)
 {
-	static char* buf = (char*)mmap(nullptr, ALLOC_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE| MAP_ANONYMOUS, -1, 0);
-	static size_t cur_len=0;
+	
+	//static size_t cur_len=0;
+	MemChunk *chunk = (MemChunk*)FuncBuffer;
+	char* ret=nullptr;
+	if (addr)
+	{
+		//if specified an address
+		//first find a memory chunk near to the address
+		//if not found, allocate one
+		MemChunk *cur = chunk;
+		bool found = false;
+		while (true)
+		{
+			if (AddressDiff(addr, cur) < ((1ULL << 31) - 1)) //if the difference is < 2g
+			{
+				chunk = cur;
+				found = true;
+				break;
+			}
+			if (cur->next) //we still need to find the tail of the list
+				cur = cur->next;
+			else
+				break;
+		}
+		if (!found)
+		{
+			if ((uintptr_t)addr >> 32 == 0) //if the suggested addr is in lower 4g address
+			{
+				chunk = (MemChunk*)mmap(addr, ALLOC_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS| MAP_32BIT, -1, 0);
+			}
+			else
+			{
+				chunk = (MemChunk*)mmap(addr, ALLOC_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+			}
+			if(!chunk)
+				return nullptr;
+			chunk->next = nullptr;
+			chunk->allocated = 0;
+			cur->next = chunk; //append the new chunk to the tail of the list
+			if (AddressDiff(chunk, addr) >= ((1ULL << 31) - 1)) //if still cannot find
+				return nullptr;
+		}
+	}
 	size_t alloc_sz = divide_and_ceil(sz, ALIGN_SIZE)*ALIGN_SIZE;
 
 	//fprintf(stderr, "Alloc buf  %p, curlen=%d, sz=%d\n", buf, cur_len, alloc_sz);
-	if (cur_len+ alloc_sz >= ALLOC_SIZE)
+	if (chunk->allocated + alloc_sz >= ALLOC_SIZE)
 		return nullptr;
-	char* ret = buf + cur_len;
-	cur_len += alloc_sz;
+	ret = chunk->buffer + chunk->allocated;
+	chunk->allocated += alloc_sz;
 	memset(ret, 0xcc, alloc_sz);
+
 	return ret;
 }
 
@@ -131,7 +195,7 @@ Do Hook. It will replace the head of the function "oldfunc" with a "jmp" to the 
 and copy the the head of the function "oldfunc" to newly alloacted space ("jump space"), returning the pointer to
 the "jump space" with "poutold". If success, return "FHSuccess"
 */
-HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_checking)
+HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_checking,void* suggested_address)
 {
 	int num_patch_points = 0;
 	static PatchInfo PatchInfoPool[MAX_PATCH_POINTS];
@@ -142,6 +206,9 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 		ZydisFormatterInit(&formatter, ZYDIS_FORMATTER_STYLE_INTEL);
 		ptrParseOperandMem = ParseOperandMem;
 		ZydisFormatterSetHook(&formatter, ZYDIS_FORMATTER_HOOK_FORMAT_OPERAND_MEM, (const void**)&ptrParseOperandMem);
+		FuncBuffer= (MemChunk*)mmap(nullptr, ALLOC_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		FuncBuffer->next = nullptr;
+		FuncBuffer->allocated = 0;
 	}
 	ZydisDecoder decoder;
 	ZydisDecoderInit(
@@ -250,7 +317,7 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 	*/
 	size_t alloc_size = length + GetJmpLen() + sizeof(size_t) + patch_jump_bed_size;
 
-	char* outfunc = AllocFunc(alloc_size);
+	char* outfunc = AllocFunc(alloc_size, suggested_address);
 	if (!outfunc)
 		return FHAllocFailed;
 
@@ -278,7 +345,11 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 			{
 				//fprintf(stderr, "Too large %p,%d\n", outfunc, oldfunc);
 				//if the relative offset is too large to be held in 32 bits
-				return FHPatchFailed;
+				//we retry with a suggested address. If there is already a 
+				//suggested address, return failure.
+				if(suggested_address)
+					return FHPatchFailed;
+				return HookItSafe(oldfunc, poutold, newfunc, need_checking, oldfunc);
 			}
 			//the patch point in copied function
 			int32_t* patch_point;patch_point = (int32_t*)(outfunc + PatchInfoPool[i].patch_addr_offset);
@@ -343,7 +414,7 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 
 HookStatus HookIt(void* oldfunc, void** poutold, void* newfunc)
 {
-	return HookItSafe(oldfunc, poutold, newfunc, 1);
+	return HookItSafe(oldfunc, poutold, newfunc, 1,nullptr);
 }
 HookStatus UnHook(void* oldfunc, void* func)
 {

@@ -3,7 +3,7 @@
 int main();
 __attribute__((naked)) void testfunc()
 {
-	asm("add   $0x0,0x7ffff10(%rip)");
+	//asm("cmpl   $0x0,0x7ffff10(%rip)");
 	//asm("cmpl   $0x0,0x10(%rip)");
 	asm goto ("jmp %l0\n"
 		: /* no output */
@@ -31,7 +31,7 @@ void test_replace()
 
 __attribute__((naked)) void testfunc2()
 {
-	//asm("cmpl   $0x0,0x10(%rip)");
+	asm("cmpl   $0x0,0x10(%rip)");
 	//asm("cmpl   $0x0,0x10(%rip)");
 	asm goto ("jne %l0\n"
 		: /* no output */
