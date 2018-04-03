@@ -25,6 +25,17 @@ inline void* AlignToPage(void* addr)
 	return (void*)((uintptr_t)addr & ~(PageSize2 - 1));
 }
 
+inline size_t AddressDiff(void* a, void* b)
+{
+	uintptr_t chunkaddr = (uintptr_t)a;
+	uintptr_t laddr = (uintptr_t)b;
+	size_t diff;
+	if (chunkaddr > laddr)
+		diff = chunkaddr - laddr;
+	else
+		diff = laddr - chunkaddr;
+	return diff;
+}
 
 static bool hasRIP = false;
 /*
@@ -59,7 +70,8 @@ Params:
 		to get the length of instructions to be gengerated
 	pTarget - The target address to jmp to
 */
-void GenerateJmp(char* pWriteTo, void* pTarget)
+
+void GenerateJmpLarge(char* pWriteTo, void* pTarget)
 {
 	*pWriteTo = 0x68;
 	pWriteTo += 1;
@@ -71,10 +83,33 @@ void GenerateJmp(char* pWriteTo, void* pTarget)
 	pWriteTo += 4;
 	*pWriteTo = 0xc3;
 }
+void GenerateJmp(char* pWriteTo, void* pTarget)
+{
+	if (AddressDiff(pWriteTo+5, pTarget) < ((1ULL << 31) - 1))
+	{
+		*pWriteTo = 0xe9; //if displacement is small,use jmp
+		pWriteTo += 1;
+		*(uint32_t*)pWriteTo = uint32_t((char*)pTarget - (pWriteTo+4));
+		return;
+	}
+	GenerateJmpLarge(pWriteTo, pTarget);
+}
 /*
 Get the length of instructions to be gengerated by GenerateJmp()
 */
-int GetJmpLen()
+int GetJmpLen(void* pWriteTo, void* pTarget)
+{
+	if (AddressDiff((char*)pWriteTo + 6, pTarget) < ((1ULL << 31) - 1))
+	{
+		return 5;
+	}
+	return 14;
+}
+
+/*
+Get the length of instructions to be gengerated by GenerateJmp()
+*/
+int GetJmpLenLarge()
 {
 	return 14;
 }
@@ -91,17 +126,7 @@ struct MemChunk
 //#define mmap_bypass mmap
 
 
-inline size_t AddressDiff(void* a,void* b)
-{
-	uintptr_t chunkaddr = (uintptr_t)a;
-	uintptr_t laddr = (uintptr_t)b;
-	size_t diff;
-	if (chunkaddr > laddr)
-		diff = chunkaddr - laddr;
-	else
-		diff = laddr - chunkaddr;
-	return diff;
-}
+
 
 static MemChunk * FuncBuffer = nullptr;
 /*
@@ -271,7 +296,7 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 				return FHTooManyPatches;
 			//if there is a jne instruction, we need one more "jmp" in
 			//our jump space to patch it, so add alloc_size with GetJmpLen()
-			patch_jump_bed_size += GetJmpLen();
+			patch_jump_bed_size += GetJmpLenLarge();
 			processed = true;
 		}
 		else if (!processed)
@@ -284,7 +309,7 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 						return FHTooManyPatches;
 					//if there is a jne instruction, we need one more "jmp" in
 					//our jump space to patch it, so add alloc_size with GetJmpLen()
-					patch_jump_bed_size += GetJmpLen();
+					patch_jump_bed_size += GetJmpLenLarge();
 					processed = true;
 					break;
 				}
@@ -304,11 +329,11 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 		}
 		readPointer += instruction.length;
 		length += instruction.length;
-		if (length >= GetJmpLen())
+		if (length >= GetJmpLen(oldfunc,newfunc))
 			break;
 		instructionPointer += instruction.length;
 	}
-	if (length < GetJmpLen())
+	if (length < GetJmpLen(oldfunc, newfunc))
 		return FHDecodeFailed;
 
 	//now "length" is the length of instructions in oldfunc to be replaced
@@ -318,7 +343,7 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 		- the "jmp" instruction jumping to the body of oldfunc
 	Also, we need to remember the alloc_size 
 	*/
-	size_t alloc_size = length + GetJmpLen() + sizeof(size_t) + patch_jump_bed_size;
+	size_t alloc_size = length + GetJmpLenLarge() + sizeof(size_t) + patch_jump_bed_size;
 
 	char* outfunc = AllocFunc(alloc_size, suggested_address);
 	if (!outfunc)
@@ -331,7 +356,7 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 	//copy oldfunc's first several instructions to the jump space
 	memcpy(outfunc, oldfunc, length);
 	//generate a "jmp" back to oldfunc's body
-	GenerateJmp(outfunc + length,(char*)oldfunc+length);
+	GenerateJmpLarge(outfunc + length,(char*)oldfunc+length);
 
 	//now get each PatchInfo and do patching in the copied function head
 	int jump_bed_num = 0;
@@ -379,7 +404,7 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 			[several "jmp" instructions to handle near jmp(s)]
 			*/
 			int delta8;
-			delta8 = outfunc + length + GetJmpLen() + jump_bed_num * GetJmpLen() - (patch_instruction + 2);
+			delta8 = outfunc + length + GetJmpLenLarge() + jump_bed_num * GetJmpLenLarge() - (patch_instruction + 2);
 			if (delta8 > 127 || delta8 < -128)
 			{
 				//fprintf(stderr, "Too large %p,%p\n", outfunc + length + GetJmpLen() + jump_bed_num * GetJmpLen(), patch_instruction + 2);
@@ -387,8 +412,8 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 			}
 			patch_instruction[1] = delta8;
 			
-			char* jmp_bed = outfunc + length + GetJmpLen()+ jump_bed_num * GetJmpLen();
-			GenerateJmp(jmp_bed, (void*)target);
+			char* jmp_bed = outfunc + length + GetJmpLenLarge()+ jump_bed_num * GetJmpLenLarge();
+			GenerateJmpLarge(jmp_bed, (void*)target);
 			jump_bed_num++;
 		}
 	}
@@ -404,7 +429,7 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 	//replace the head of oldfunc with newfunc
 	GenerateJmp((char*)oldfunc, newfunc);
 	//fill the gap with "int 3"
-	memset((char*)oldfunc+ GetJmpLen(), 0xcc, length- GetJmpLen());
+	memset((char*)oldfunc+ GetJmpLen((char*)oldfunc, newfunc), 0xcc, length- GetJmpLen((char*)oldfunc, newfunc));
 	//restore the protection
 	for (uintptr_t start = (uintptr_t)AlignToPage(oldfunc); start <= (uintptr_t)AlignToPage((char*)oldfunc + length - 1); start += PageSize2)
 	{
