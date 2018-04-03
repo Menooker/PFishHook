@@ -222,10 +222,12 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 
 	const unsigned char patch_target_32_load[][5] = { //instructions with 32-bit relative offset memory load
 		{0x83, 0x3d}, //cmp relative
+		{0xe9}, //jmpq
 	}; 
 	const unsigned char patch_target_32_load_instr_len[]
 	{
 		2, //cmp relative
+		1, //jmpq
 	};
 	const int patch_target_32_load_len = sizeof(patch_target_32_load) / sizeof(patch_target_32_load[0]);
 
@@ -254,6 +256,7 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 			int len = patch_target_32_load_instr_len[i];
 			if (!memcmp(readPointer, patch_target_32_load[i],len))
 			{
+				//fprintf(stderr, "PATCH %x\n", patch_target_32_load[i][0]);
 				if(InsertPatchPoint(PatchInfoPool, num_patch_points, FHPatchLoad32, (readPointer + len) - (uint8_t*)oldfunc))
 					return FHTooManyPatches;
 				processed = true;

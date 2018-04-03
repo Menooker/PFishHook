@@ -5,11 +5,7 @@ __attribute__((naked)) void testfunc()
 {
 	//asm("cmpl   $0x0,0x7ffff10(%rip)");
 	//asm("cmpl   $0x0,0x10(%rip)");
-	asm goto ("jmp %l0\n"
-		: /* no output */
-	: /* no input */
-		: /* no clobber */
-		: gofurther);
+	asm ("jmpq $10\n");
 	asm goto ("ja %l0\n"
 		: /* no output */
 	: /* no input */
@@ -67,5 +63,6 @@ int main()
 {
 	printf("%d\n",HookIt((void*)testfunc, (void**)&poldfunc, (void*)test_replace));
 	printf("%d\n", HookIt((void*)testfunc2, (void**)&poldfunc2, (void*)test_replace2));
+	HAHA:
 	return 0;
 }
