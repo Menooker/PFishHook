@@ -17,6 +17,7 @@ git clone https://github.com/zyantific/zydis
 cd zydis
 mkdir build && cd build
 cmake ..
+echo "set(CMAKE_C_FLAGS  \"${CMAKE_C_FLAGS} -fPIC\")" >>../CMakeLists.txt
 make
 cp ZydisExportConfig.h ../include
 ```
