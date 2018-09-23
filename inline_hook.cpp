@@ -178,7 +178,7 @@ static char* AllocFunc(size_t sz,void* addr)
 			else
 			{
 				chunk = (MemChunk*)mmap(addr, ALLOC_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-				if (AddressDiff(chunk, addr) >= ((1ULL << 31) - 1)){
+				if (availbuf!=nullptr && AddressDiff(chunk, addr) >= ((1ULL << 31) - 1)){
 					munmap(chunk,ALLOC_SIZE);
 					chunk=(MemChunk*)mmap(availbuf, ALLOC_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 					availbuf=(void*)chunk;
@@ -204,10 +204,10 @@ static char* AllocFunc(size_t sz,void* addr)
 
 	return ret;
 }
-void GetTextAddr(){
+uintptr_t GetTextAddr(){
 	ldtt tmp;
 	syscall(SYS_modify_ldt,0,&tmp,sizeof(tmp));
-	return tmp.base_addr;
+	return (uintptr_t)tmp.base_addr;
 }
 
 enum PatchType
@@ -254,7 +254,8 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 		FuncBuffer= (MemChunk*)mmap(nullptr, ALLOC_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 		FuncBuffer->next = nullptr;
 		FuncBuffer->allocated = 0;
-		availbuf=GetTextAddr()-0x20000000; //512MB
+		if((uintptr_t)GetTextAddr()>>32!=0)
+		availbuf=(void*)((uintptr_t)GetTextAddr()-(uintptr_t)0x20000000); //512MB
 	}
 	ZydisDecoder decoder;
 	ZydisDecoderInit(
