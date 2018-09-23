@@ -255,7 +255,7 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 		FuncBuffer->next = nullptr;
 		FuncBuffer->allocated = 0;
 		if((uintptr_t)GetTextAddr()>>32!=0)
-		availbuf=(void*)((uintptr_t)GetTextAddr()-(uintptr_t)0x20000000); //512MB
+		availbuf=(void*)((uintptr_t)GetTextAddr()-(uintptr_t)0x20000000);  //512MB
 	}
 	ZydisDecoder decoder;
 	ZydisDecoderInit(
