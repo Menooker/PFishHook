@@ -8,8 +8,19 @@
 #include <limits.h>
 #include "PFishHook.h"
 #include <math.h>
-
-
+#include<sys/syscall.h>
+struct ldtt {
+               unsigned int  entry_number;
+               unsigned long base_addr;
+               unsigned int  limit;
+               unsigned int  seg_32bit:1;
+               unsigned int  contents:2;
+               unsigned int  read_exec_only:1;
+               unsigned int  limit_in_pages:1;
+               unsigned int  seg_not_present:1;
+               unsigned int  useable:1;
+           };
+static void* availbuf=0;
 static size_t PageSize2= 0;
 static ZydisFormatter formatter;
 static ZydisStatus (*ptrParseOperandMem)(const ZydisFormatter* formatter, ZydisString* string,
@@ -167,6 +178,11 @@ static char* AllocFunc(size_t sz,void* addr)
 			else
 			{
 				chunk = (MemChunk*)mmap(addr, ALLOC_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+				if (AddressDiff(chunk, addr) >= ((1ULL << 31) - 1)){
+					munmap(chunk,ALLOC_SIZE);
+					chunk=(MemChunk*)mmap(availbuf, ALLOC_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+					availbuf=(void*)chunk;
+				}
 			}
 			if(!chunk)
 				return nullptr;
@@ -188,7 +204,11 @@ static char* AllocFunc(size_t sz,void* addr)
 
 	return ret;
 }
-
+void GetTextAddr(){
+	ldtt tmp;
+	syscall(SYS_modify_ldt,0,&tmp,sizeof(tmp));
+	return tmp.base_addr;
+}
 
 enum PatchType
 {
@@ -234,6 +254,7 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 		FuncBuffer= (MemChunk*)mmap(nullptr, ALLOC_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 		FuncBuffer->next = nullptr;
 		FuncBuffer->allocated = 0;
+		availbuf=GetTextAddr()-0x20000000; //512MB
 	}
 	ZydisDecoder decoder;
 	ZydisDecoderInit(
