@@ -8,8 +8,19 @@
 #include <limits.h>
 #include "PFishHook.h"
 #include <math.h>
-
-
+#include<sys/syscall.h>
+/*struct ldtt {
+               unsigned int  entry_number;
+               unsigned long base_addr;
+               unsigned int  limit;
+               unsigned int  seg_32bit:1;
+               unsigned int  contents:2;
+               unsigned int  read_exec_only:1;
+               unsigned int  limit_in_pages:1;
+               unsigned int  seg_not_present:1;
+               unsigned int  useable:1;
+           };*/
+static void* availbuf=0;
 static size_t PageSize2= 0;
 static ZydisFormatter formatter;
 static ZydisStatus (*ptrParseOperandMem)(const ZydisFormatter* formatter, ZydisString* string,
@@ -124,7 +135,7 @@ struct MemChunk
 };
 #define ALLOC_AVAILABLE (ALLOC_SIZE-sizeof(MemChunk))
 //#define mmap_bypass mmap
-
+#define mmap(a,b,c,d,e,f) syscall(SYS_mmap,a,b,c,d,e,f)
 
 
 
@@ -167,6 +178,11 @@ static char* AllocFunc(size_t sz,void* addr)
 			else
 			{
 				chunk = (MemChunk*)mmap(addr, ALLOC_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+				if (availbuf!=nullptr && AddressDiff(chunk, addr) >= ((1ULL << 31) - 1)){
+					munmap(chunk,ALLOC_SIZE);
+					chunk=(MemChunk*)mmap(availbuf, ALLOC_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+					availbuf=(void*)chunk;
+				}
 			}
 			if(!chunk)
 				return nullptr;
@@ -188,7 +204,15 @@ static char* AllocFunc(size_t sz,void* addr)
 
 	return ret;
 }
-
+uintptr_t GetELFAddr(){
+	char buf[256];
+	int fd=syscall(SYS_open,"/proc/self/maps",O_RDONLY);
+	syscall(SYS_read,fd,buf,256);
+	syscall(SYS_close,fd);
+	uintptr_t ret;
+	sscanf(buf,"%p",&ret);
+	return ret;
+}
 
 enum PatchType
 {
@@ -234,6 +258,8 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 		FuncBuffer= (MemChunk*)mmap(nullptr, ALLOC_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 		FuncBuffer->next = nullptr;
 		FuncBuffer->allocated = 0;
+		if((uintptr_t)GetELFAddr()>>32!=0)
+		availbuf=(void*)((uintptr_t)GetELFAddr()-(uintptr_t)0x20000000); //512MB
 	}
 	ZydisDecoder decoder;
 	ZydisDecoderInit(
