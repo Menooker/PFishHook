@@ -20,7 +20,7 @@
                unsigned int  seg_not_present:1;
                unsigned int  useable:1;
            };*/
-static void* availbuf=0;
+static void* availbuf=0; //the address of the start of the code/text segment
 static size_t PageSize2= 0;
 static ZydisFormatter formatter;
 static ZydisStatus (*ptrParseOperandMem)(const ZydisFormatter* formatter, ZydisString* string,
@@ -178,13 +178,15 @@ static char* AllocFunc(size_t sz,void* addr)
 			else
 			{
 				chunk = (MemChunk*)mmap(addr, ALLOC_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-				if (availbuf!=nullptr && AddressDiff(chunk, addr) >= ((1ULL << 31) - 1)){
+				if (chunk!=MAP_FAILED && availbuf!=nullptr 
+					&& AddressDiff(chunk, addr) >= ((1ULL << 31) - 1)){ 
+					//if we used the hint, but the address difference is still too large, try to mmap an address before the ".text" segment
 					munmap(chunk,ALLOC_SIZE);
 					chunk=(MemChunk*)mmap(availbuf, ALLOC_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 					availbuf=(void*)chunk;
 				}
 			}
-			if(!chunk)
+			if(chunk==MAP_FAILED)
 				return nullptr;
 			chunk->next = nullptr;
 			chunk->allocated = 0;
@@ -204,12 +206,13 @@ static char* AllocFunc(size_t sz,void* addr)
 
 	return ret;
 }
-uintptr_t GetELFAddr(){
+
+void* GetELFAddr(){
 	char buf[256];
 	int fd=syscall(SYS_open,"/proc/self/maps",O_RDONLY);
 	syscall(SYS_read,fd,buf,256);
 	syscall(SYS_close,fd);
-	uintptr_t ret;
+	void* ret;
 	sscanf(buf,"%p",&ret);
 	return ret;
 }
@@ -258,8 +261,9 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 		FuncBuffer= (MemChunk*)mmap(nullptr, ALLOC_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 		FuncBuffer->next = nullptr;
 		FuncBuffer->allocated = 0;
-		if((uintptr_t)GetELFAddr()>>32!=0)
-		availbuf=(void*)((uintptr_t)GetELFAddr()-(uintptr_t)0x20000000); //512MB
+		uintptr_t baseaddr = (uintptr_t)GetELFAddr();
+		if(baseaddr>>32!=0)
+			availbuf=(void*)(baseaddr-(uintptr_t)0x20000000); //512MB
 	}
 	ZydisDecoder decoder;
 	ZydisDecoderInit(
