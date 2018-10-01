@@ -275,16 +275,18 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 	uint8_t* readPointer = (uint8_t*)oldfunc;
 	size_t length = 0;
 
-	const unsigned char patch_target_32_load[][5] = { //instructions with 32-bit relative offset memory load
+	const unsigned char patch_target_32_load[][5] = { //instructions with 32-bit relative offset
 		{0x83, 0x3d}, //cmp relative
 		{0xe9}, //jmpq
 		{0x8d, 0x0d}, //lea rax, [rip+0x1234]
+		{0xe8}, //callq
 	}; 
 	const unsigned char patch_target_32_load_instr_len[]
 	{
 		2, //cmp relative
 		1, //jmpq
 		2, //lea
+		1, //callq
 	};
 	const int patch_target_32_load_len = sizeof(patch_target_32_load) / sizeof(patch_target_32_load[0]);
 
@@ -397,7 +399,7 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 		switch (PatchInfoPool[i].type)
 		{
 		case FHPatchLoad32:
-			//if there is a cmp relative instr
+			//if there is a 32-bit relative instr
 			int32_t offset; offset = *(int32_t*)((unsigned char*)oldfunc + PatchInfoPool[i].patch_addr_offset);
 			//calculate the new relative offset
 			int64_t delta; delta = (int64_t)offset - ((char*)outfunc - (char*)oldfunc);

@@ -85,8 +85,20 @@ gofurther3:
 
 }
 
+__attribute__((naked)) void testfunc_call()
+{
+gofurther:
+	asm("call  main");
+gofurther2:
+	asm("call  main");
+gofurther3:
+	asm("call  main");
+
+}
+
 void(*poldfunc2)();
 void(*poldfunc3)();
+void(*poldfunc4)();
 void test_replace2()
 {
 	return poldfunc2();
@@ -105,7 +117,8 @@ int main()
 	printf("%d\n",HookIt((void*)testfunc, (void**)&poldfunc, (void*)test_replace));
 	printf("%d\n", HookIt((void*)testfunc2, (void**)&poldfunc2, (void*)test_replace2));
 	printf("%d\n", HookIt((void*)testfunc_lea, (void**)&poldfunc3, (void*)test_replace2));
-	
+	printf("%d\n", HookIt((void*)testfunc_call, (void**)&poldfunc4, (void*)test_replace2));
+
 /*	void* pread = dlsym(RTLD_NEXT, "read");
 	if (!pread)
 	{
