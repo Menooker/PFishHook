@@ -57,7 +57,36 @@ gofurther3:
 
 }
 
+__attribute__((naked)) void testfunc_lea()
+{
+	asm("lea 0x123450(%rip),%ecx ");
+	//asm("cmpl   $0x0,0x10(%rip)");
+	asm goto ("jne %l0\n"
+		: /* no output */
+	: /* no input */
+		: /* no clobber */
+		: gofurther);
+	asm goto ("ja %l0\n"
+		: /* no output */
+	: /* no input */
+		: /* no clobber */
+		: gofurther2);
+	asm goto ("ja %l0\n"
+		: /* no output */
+	: /* no input */
+		: /* no clobber */
+		: gofurther3);
+gofurther:
+	asm("call  main");
+gofurther2:
+	asm("call  main");
+gofurther3:
+	asm("call  main");
+
+}
+
 void(*poldfunc2)();
+void(*poldfunc3)();
 void test_replace2()
 {
 	return poldfunc2();
@@ -75,6 +104,8 @@ int main()
 {
 	printf("%d\n",HookIt((void*)testfunc, (void**)&poldfunc, (void*)test_replace));
 	printf("%d\n", HookIt((void*)testfunc2, (void**)&poldfunc2, (void*)test_replace2));
+	printf("%d\n", HookIt((void*)testfunc_lea, (void**)&poldfunc3, (void*)test_replace2));
+	
 /*	void* pread = dlsym(RTLD_NEXT, "read");
 	if (!pread)
 	{

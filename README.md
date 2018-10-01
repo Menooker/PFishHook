@@ -83,3 +83,6 @@ The "shadown function" has the same functionality of the original function.
 ## Limitations and known issues
  * PFishHook can only deal with functions with length at least 14 bytes (which is the size of "jump" instructions).
  * Some Linux syscall wrapper functions like "read" has RIP-relative instructions in the function's head. We move the function's head to the shadow function, so the RIP has change. In this case, we need to patch RIP-relative instructions' displacement. Some of the instructions has been patched in PFishHooks. However, many others are not yet patched.
+ * PFishHook do not allow any jumps into the middle of replaced (hooked) funcion head.
+
+Users should check the functions to hook carefully to see whether the function violates the above limitations.

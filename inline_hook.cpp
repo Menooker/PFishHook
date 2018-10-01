@@ -278,11 +278,13 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 	const unsigned char patch_target_32_load[][5] = { //instructions with 32-bit relative offset memory load
 		{0x83, 0x3d}, //cmp relative
 		{0xe9}, //jmpq
+		{0x8d, 0x0d}, //lea rax, [rip+0x1234]
 	}; 
 	const unsigned char patch_target_32_load_instr_len[]
 	{
 		2, //cmp relative
 		1, //jmpq
+		2, //lea
 	};
 	const int patch_target_32_load_len = sizeof(patch_target_32_load) / sizeof(patch_target_32_load[0]);
 
@@ -319,12 +321,12 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 			}
 		}
 
-		//if it is a jne relative instr
+		//if it is a jmp relative instr
 		if (!processed && *readPointer >= 0x70 && *readPointer <= 0x7f)
 		{
 			if (InsertPatchPoint(PatchInfoPool, num_patch_points, FHPatchJump8, (readPointer + 1) - (uint8_t*)oldfunc))
 				return FHTooManyPatches;
-			//if there is a jne instruction, we need one more "jmp" in
+			//if there is a jmp instruction, we need one more "jmp" in
 			//our jump space to patch it, so add alloc_size with GetJmpLen()
 			patch_jump_bed_size += GetJmpLenLarge();
 			processed = true;
