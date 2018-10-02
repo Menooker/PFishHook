@@ -1,4 +1,5 @@
 #pragma once
+
 enum HookStatus
 {
 	FHSuccess,
@@ -10,7 +11,14 @@ enum HookStatus
 	FHUnrecognizedRIP,
 };
 
-extern "C" HookStatus HookIt(void* oldfunc, void** poutold, void* newfunc);
-extern "C" HookStatus UnHook(void* oldfunc, void* func);
-extern "C" void* GetELFAddr();
-extern "C" void trimAll();
+#ifdef __cplusplus 
+extern "C" {
+#endif
+ HookStatus HookIt(void* oldfunc, void** poutold, void* newfunc);
+ HookStatus UnHook(void* oldfunc, void* func);
+ void* GetELFAddr();
+ void TrimAll();
+
+#ifdef __cplusplus 
+}
+#endif 
