@@ -12,3 +12,5 @@ enum HookStatus
 
 extern "C" HookStatus HookIt(void* oldfunc, void** poutold, void* newfunc);
 extern "C" HookStatus UnHook(void* oldfunc, void* func);
+extern "C" void* GetELFAddr();
+extern "C" void trimAll();

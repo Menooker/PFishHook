@@ -136,14 +136,75 @@ struct MemChunk
 #define ALLOC_AVAILABLE (ALLOC_SIZE-sizeof(MemChunk))
 //#define mmap_bypass mmap
 #define mmap(a,b,c,d,e,f) syscall(SYS_mmap,a,b,c,d,e,f)
+#define munmap(a,b) syscall(SYS_munmap,a,b)
+#define mremap(a,b,c,d) syscall(SYS_mremap,a,b,c,d)
 
-
-
+struct MemPool{
+	size_t size;
+	size_t allocated;
+	char buffer[0];
+};
+static void* baseaddr=nullptr;
+static int initMemPool( MemPool** pl,void* addr,size_t sz){
+	*pl=(MemPool*)mmap(addr,sz,PROT_READ | PROT_WRITE |PROT_EXEC , MAP_PRIVATE | MAP_ANONYMOUS,-1,0);
+	if(*pl==MAP_FAILED) return -1;
+	(*pl)->size=sz-(sizeof(size_t)<<1);
+	(*pl)->allocated=0;
+	return 0;
+}
+static void delMemPool( MemPool* pl,size_t sz){
+	munmap(pl,sz);
+}
+static void trimMemPool(MemPool* pl,size_t sz){
+	mremap(pl,sz,pl->allocated+(sizeof(size_t)<<1),0);
+	pl->size=pl->allocated;
+}
+static char* AllocMemPool(MemPool* pl,size_t sz){
+	if(pl->allocated+sz>pl->size) return nullptr;
+	char* ret=pl->buffer+pl->allocated;	
+	pl->allocated+=sz;	
+	return ret;
+}
 static MemChunk * FuncBuffer = nullptr;
+static MemPool* AllocELF=nullptr;
+static MemPool* AllocLIB=nullptr;
+#define BUFFER_SZ 0x20000000 //512MB
 /*
 Alloc the "jump space" for old function head
 */
+void trimAll(){
+	if(AllocELF) trimMemPool(AllocELF,AllocELF->size+(sizeof(size_t)<<1));
+	if(AllocLIB) trimMemPool(AllocLIB,AllocLIB->size+(sizeof(size_t)<<1));
+}
 static char* AllocFunc(size_t sz,void* addr)
+{
+//	printf("baseaddr %p needle %p\n",baseaddr,addr);
+	#define ADDR_OK(x,y) (AddressDiff(x, y) < ((1ULL << 31) - 1))
+	if(ADDR_OK(addr,baseaddr)){
+		if(AllocELF==nullptr){
+			int tmp=initMemPool(&AllocELF,baseaddr,BUFFER_SZ);
+			if(tmp==-1) return nullptr;
+			if(!ADDR_OK(addr,AllocELF)){
+				delMemPool(AllocELF,BUFFER_SZ);
+				AllocELF=nullptr;
+				return nullptr;
+			}
+		}
+		return AllocMemPool(AllocELF,sz);
+	}else{
+		if(AllocLIB==nullptr){
+			int tmp=initMemPool(&AllocLIB,nullptr,BUFFER_SZ);
+			if(tmp==-1) return nullptr;
+			if(!ADDR_OK(addr,AllocLIB) && addr!=nullptr){
+				delMemPool(AllocLIB,BUFFER_SZ);
+				AllocLIB=nullptr;
+				return nullptr;
+			}
+		}
+		return (ADDR_OK(AllocLIB,addr)||addr==nullptr)?AllocMemPool(AllocLIB,sz):nullptr;
+	}
+}
+static char* AllocFunc_old(size_t sz,void* addr)
 {
 	
 	//static size_t cur_len=0;
@@ -258,12 +319,20 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 		ZydisFormatterInit(&formatter, ZYDIS_FORMATTER_STYLE_INTEL);
 		ptrParseOperandMem = ParseOperandMem;
 		ZydisFormatterSetHook(&formatter, ZYDIS_FORMATTER_HOOK_FORMAT_OPERAND_MEM, (const void**)&ptrParseOperandMem);
-		FuncBuffer= (MemChunk*)mmap(nullptr, ALLOC_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		/*FuncBuffer= (MemChunk*)mmap(nullptr, ALLOC_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 		FuncBuffer->next = nullptr;
-		FuncBuffer->allocated = 0;
-		uintptr_t baseaddr = (uintptr_t)GetELFAddr();
-		if(baseaddr>>32!=0)
-			availbuf=(void*)(baseaddr-(uintptr_t)0x20000000); //512MB
+		FuncBuffer->allocated = 0;*/
+		baseaddr = GetELFAddr();
+		if((uintptr_t)baseaddr>>32!=0){
+			//64 bit address
+			baseaddr=(void*)(baseaddr-(uintptr_t)BUFFER_SZ); //512MB
+		}else{
+			if(baseaddr>BUFFER_SZ+(void*)0x10000){
+				baseaddr-=BUFFER_SZ+0x10000;
+			}else{
+				baseaddr=baseaddr+0x80000000-BUFFER_SZ;	//2GB	
+			}
+		}
 	}
 	ZydisDecoder decoder;
 	ZydisDecoderInit(
@@ -356,8 +425,8 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 				&formatter, &instruction, buffer, sizeof(buffer));
 			if (hasRIP)
 			{
-				fprintf(stderr, "PFishHook is unable to patch this instruction with RIP: %s\nPlease report an issue at github.com/Menooker/PFishHook.\n",
-					buffer);
+				fprintf(stderr, "PFishHook is unable to patch this instruction with RIP: %s\nPlease report an issue at github.com/Menooker/PFishHook. addr %p\n",
+					buffer,instruction);
 				return FHUnrecognizedRIP;
 			}
 		}
