@@ -30,7 +30,7 @@ cd PFishHook
 make directories
 make lib INCLUDE=../zydis/include LIBPATH=../zydis/build
 ```
-Now, you can find libPFishHook.a in "bin" directory. To compile with PFishHook, you should also link Zydis's static library with "-lZydis" argument.
+Now, you can find libPFishHook.a in "bin" directory. To compile with PFishHook,you should add bin/libPFishHook.a to your files.
 
 ## How to use
 
