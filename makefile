@@ -32,7 +32,7 @@ header: PFishHook.h
 
 
 test: hooktest.o lib
-	g++ hooktest.o ${OUT_DIR}/libPFishHook.a -L$(LIBPATH)  -lZydis -o hooktest
+	g++ hooktest.o ${OUT_DIR}/libPFishHook.a -L$(LIBPATH)  -o hooktest
 
 clean:
 	rm -f *.o
