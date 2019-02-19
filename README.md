@@ -15,10 +15,11 @@ Compile Zydis:
 ```shell
 git clone https://github.com/zyantific/zydis
 cd zydis
+git reset --hard 9ec1e0c4d17bf08f17575e25b0c2cf70c5cc879b
 mkdir build && cd build
 echo "set(CMAKE_C_FLAGS  \"${CMAKE_C_FLAGS} -fPIC\")" >>../CMakeLists.txt
 cmake ..
-make
+make -j4
 cp ZydisExportConfig.h ../include
 ```
 

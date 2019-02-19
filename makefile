@@ -11,7 +11,7 @@ CXX ?= g++
 CXXFLAGS ?= -std=c++11 -O3 -I$(INCLUDE) -L$(LIBPATH)
 LIBS ?= 
 
-all: directories libPFishHook.a header
+all: directories ${OUT_DIR}/libPFishHook.a header
 
 directories:
 	mkdir -p ${OUT_DIR}
