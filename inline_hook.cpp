@@ -356,6 +356,7 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 		{0xe9}, //jmpq
 		{0x8d, 0x0d}, //lea rax, [rip+0x1234]
 		{0xe8}, //callq
+		{0xff,0x25}, //jmpq [rip+0x1234]
 	}; 
 	const unsigned char patch_target_32_load_instr_len[]
 	{
@@ -363,6 +364,7 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 		1, //jmpq
 		2, //lea
 		1, //callq
+		2, //jmpq
 	};
 	const int patch_target_32_load_len = sizeof(patch_target_32_load) / sizeof(patch_target_32_load[0]);
 
