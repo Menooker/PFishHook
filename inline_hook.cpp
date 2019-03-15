@@ -354,10 +354,11 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 	const unsigned char patch_target_32_load[][5] = { //instructions with 32-bit relative offset
 		{0x83, 0x3d}, //cmp relative
 		{0xe9}, //jmpq
-		{0x8d, 0x0d}, //lea rax, [rip+0x1234]
+		{0x8d, 0x0d}, //lea eax, [rip+0x1234]
 		{0xe8}, //callq
 		{0xff,0x25}, //jmpq [rip+0x1234]
-	}; 
+		{0x48,0x8d,0x05}, //lea rax, [rip+0x1234] 
+	};
 	const unsigned char patch_target_32_load_instr_len[]
 	{
 		2, //cmp relative
@@ -365,6 +366,7 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 		2, //lea
 		1, //callq
 		2, //jmpq
+		3, //lea (64)
 	};
 	const int patch_target_32_load_len = sizeof(patch_target_32_load) / sizeof(patch_target_32_load[0]);
 
