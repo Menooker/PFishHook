@@ -316,6 +316,15 @@ inline bool InsertPatchPoint(PatchInfo* pool, int& num_patch_points, PatchType t
 	pinfo->patch_addr_offset = offset;//(readPointer + len) - (uint8_t*)oldfunc;
 	return false;
 }
+
+#define FHASSERT(cond,pinst) do{\
+	if(!(cond)){\
+		fprintf(stderr, "PFishHook is unable to patch this instructions with RIP: %lx\n",\
+			*(uint64_t*)pinst);\
+		return FHUnrecognizedRIP;\
+	}\
+}while (0);
+
 /*
 Do Hook. It will replace the head of the function "oldfunc" with a "jmp" to the function "newfunc",
 and copy the the head of the function "oldfunc" to newly alloacted space ("jump space"), returning the pointer to
@@ -351,35 +360,8 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 	uint8_t* readPointer = (uint8_t*)oldfunc;
 	size_t length = 0;
 
-	const unsigned char patch_target_32_load[][5] = { //instructions with 32-bit relative offset
-		{0x83, 0x3d}, //cmp relative
-		{0xe9}, //jmpq
-		{0x8d, 0x0d}, //lea eax, [rip+0x1234]
-		{0xe8}, //callq
-		{0xff,0x25}, //jmpq [rip+0x1234]
-		{0x48,0x8d,0x05}, //lea rax, [rip+0x1234] 
-	};
-	const unsigned char patch_target_32_load_instr_len[]
-	{
-		2, //cmp relative
-		1, //jmpq
-		2, //lea
-		1, //callq
-		2, //jmpq
-		3, //lea (64)
-	};
-	const int patch_target_32_load_len = sizeof(patch_target_32_load) / sizeof(patch_target_32_load[0]);
-
-	const unsigned char patch_target_8_jmp[] = { //8-bit relative jump instructions 
-		0xe3,//JCXZ
-		0xeb,//jmp
-	}; 
-	const int patch_target_8_jmp_len = sizeof(patch_target_8_jmp) / sizeof(patch_target_8_jmp[0]);
 
 	int patch_jump_bed_size = 0;
-	//unsigned char* patch_addr=nullptr;
-	//unsigned char* patch_addr_jne = nullptr;
-
 	//we first check the head of oldfunc. We use the disassembler to 
 	//find the length of each instruction until there is enough space
 	//to hold our "jmp" instructions
@@ -388,58 +370,53 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 	while (ZYDIS_SUCCESS(ZydisDecoderDecodeBuffer(
 		&decoder, readPointer, 128, instructionPointer, &instruction)))
 	{
-		bool processed = false;
-		//if it is a cmp relative instr
-		for (int i = 0; i < patch_target_32_load_len; i++)
+		bool patched = false;
+		if (instruction.attributes & ZYDIS_ATTRIB_IS_RELATIVE)
 		{
-			int len = patch_target_32_load_instr_len[i];
-			if (!memcmp(readPointer, patch_target_32_load[i],len))
+			FHASSERT(instruction.operandCount >= 1, instruction.instrAddress);
+			for (int i = 0; i < instruction.operandCount; i++) //for all operands, check if it is RIP-relative
 			{
-				//fprintf(stderr, "PATCH %x\n", patch_target_32_load[i][0]);
-				if(InsertPatchPoint(PatchInfoPool, num_patch_points, FHPatchLoad32, (readPointer + len) - (uint8_t*)oldfunc))
-					return FHTooManyPatches;
-				processed = true;
-				break;
-			}
-		}
-
-		//if it is a jmp relative instr
-		if (!processed && *readPointer >= 0x70 && *readPointer <= 0x7f)
-		{
-			if (InsertPatchPoint(PatchInfoPool, num_patch_points, FHPatchJump8, (readPointer + 1) - (uint8_t*)oldfunc))
-				return FHTooManyPatches;
-			//if there is a jmp instruction, we need one more "jmp" in
-			//our jump space to patch it, so add alloc_size with GetJmpLen()
-			patch_jump_bed_size += GetJmpLenLarge();
-			processed = true;
-		}
-		else if (!processed)
-		{
-			for (int i = 0; i<patch_target_8_jmp_len; i++)
-			{
-				if (*readPointer == patch_target_8_jmp[i])
+				auto operand = &instruction.operands[i];
+				if (operand->type == ZYDIS_OPERAND_TYPE_MEMORY && operand->mem.disp.hasDisplacement)
 				{
-					if (InsertPatchPoint(PatchInfoPool, num_patch_points, FHPatchJump8, (readPointer + 1) - (uint8_t*)oldfunc))
-						return FHTooManyPatches;
-					//if there is a jne instruction, we need one more "jmp" in
-					//our jump space to patch it, so add alloc_size with GetJmpLen()
-					patch_jump_bed_size += GetJmpLenLarge();
-					processed = true;
-					break;
+					FHASSERT(operand->mem.base != ZYDIS_REGISTER_EIP, instruction.instrAddress);
+					if (operand->mem.base == ZYDIS_REGISTER_RIP)
+					{
+						FHASSERT(instruction.raw.disp.size == 32, instruction.instrAddress);
+						patched = true;
+						if (InsertPatchPoint(PatchInfoPool, num_patch_points, FHPatchLoad32, (readPointer + instruction.raw.disp.offset) - (uint8_t*)oldfunc))
+							return FHTooManyPatches;
+					}
 				}
-			}
-		}
-		if(need_checking && !processed)
-		{
-			char buffer[256];
-			ZydisFormatterFormatInstruction(
-				&formatter, &instruction, buffer, sizeof(buffer));
-			if (hasRIP)
-			{
-				fprintf(stderr, "PFishHook is unable to patch this instruction with RIP: %s\nPlease report an issue at github.com/Menooker/PFishHook. addr %p\n",
-					buffer,(void*)instruction.instrAddress);
-				return FHUnrecognizedRIP;
-			}
+				else if (operand->type == ZYDIS_OPERAND_TYPE_IMMEDIATE)
+				{
+					if (operand->imm.isSigned && operand->imm.isRelative)
+					{
+						if (instruction.raw.imm[0].size == 8)
+						{
+							patched = true;
+							if (InsertPatchPoint(PatchInfoPool, num_patch_points, FHPatchJump8,
+								(readPointer + instruction.raw.imm[0].offset) - (uint8_t*)oldfunc))
+								return FHTooManyPatches;
+							//if there is a jmp instruction, we need one more "jmp" in
+							//our jump space to patch it, so add alloc_size with GetJmpLen()
+							patch_jump_bed_size += GetJmpLenLarge();
+						}
+						else if (instruction.raw.imm[0].size == 32)
+						{
+							patched = true;
+							if (InsertPatchPoint(PatchInfoPool, num_patch_points, FHPatchLoad32,
+								(readPointer + instruction.raw.imm[0].offset) - (uint8_t*)oldfunc))
+								return FHTooManyPatches;
+						}
+						else
+						{
+							FHASSERT(0, instruction.instrAddress);
+						}
+					}
+				}
+			}	
+			FHASSERT(patched, instruction.instrAddress);
 		}
 		readPointer += instruction.length;
 		length += instruction.length;
@@ -485,7 +462,6 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 			int64_t delta; delta = (int64_t)offset - ((char*)outfunc - (char*)oldfunc);
 			if (delta > INT_MAX || delta < INT_MIN)
 			{
-				//fprintf(stderr, "Too large %p,%d\n", outfunc, oldfunc);
 				//if the relative offset is too large to be held in 32 bits
 				//we retry with a suggested address. If there is already a 
 				//suggested address, return failure.
@@ -521,7 +497,6 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 			delta8 = outfunc + length + GetJmpLenLarge() + jump_bed_num * GetJmpLenLarge() - (patch_instruction + 2);
 			if (delta8 > 127 || delta8 < -128)
 			{
-				//fprintf(stderr, "Too large %p,%p\n", outfunc + length + GetJmpLen() + jump_bed_num * GetJmpLen(), patch_instruction + 2);
 				return FHPatchFailed;
 			}
 			patch_instruction[1] = delta8;

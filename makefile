@@ -8,7 +8,7 @@ LIBPATH=$(PWD_DIR)
 ABS_LIBPATH= $(realpath $(LIBPATH))
 
 CXX ?= g++
-CXXFLAGS ?= -std=c++11 -O3 -I$(INCLUDE) -L$(LIBPATH)
+CXXFLAGS ?= -std=c++11 -O2 -I$(INCLUDE) -L$(LIBPATH)
 LIBS ?= 
 
 all: directories ${OUT_DIR}/libPFishHook.a header
@@ -34,7 +34,7 @@ header: PFishHook.h
 	cp $(PWD_DIR)/PFishHook.h $(OUT_INC_DIR)/PFishHook.h
 
 
-hooktest: hooktest.o lib
+hooktest: hooktest.o ${OUT_DIR}/libPFishHook.a
 	g++ hooktest.o ${OUT_DIR}/libPFishHook.a -L$(LIBPATH) -o hooktest
 
 clean:

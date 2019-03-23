@@ -1,26 +1,18 @@
 #include "PFishHook.h"
+#include <Zydis/Zydis.h>
 #include <stdio.h>
-int main();
-__attribute__((naked)) void testfunc()
-{
-	//asm("cmpl   $0x0,0x7ffff10(%rip)");
-	//asm("cmpl   $0x0,0x10(%rip)");
-	asm goto ("ja %l0\n"
-		: /* no output */
-	: /* no input */
-		: /* no clobber */
-		: gofurther);
-	asm goto ("ja %l0\n"
-		: /* no output */
-	: /* no input */
-		: /* no clobber */
-		: gofurther2);
-gofurther:
-	asm("call  main");
-gofurther2:
-	asm("call  main");
+#include <stdint.h>
 
-}
+int main();
+
+asm("testfunc:\n\
+ja gofurther2\n\
+gofurther:\n\
+	call  main\n\
+gofurther2:\n\
+	call  main\n\
+");
+extern "C" void testfunc();
 
 void(*poldfunc)();
 void test_replace()
@@ -28,73 +20,33 @@ void test_replace()
 	return poldfunc();
 }
 
-
-__attribute__((naked)) void testfunc2()
-{
-	asm("cmpl   $0x0,0x10(%rip)");
-	//asm("cmpl   $0x0,0x10(%rip)");
-	asm goto ("jne %l0\n"
-		: /* no output */
-	: /* no input */
-		: /* no clobber */
-		: gofurther);
-	asm goto ("ja %l0\n"
-		: /* no output */
-	: /* no input */
-		: /* no clobber */
-		: gofurther2);
-	asm goto ("ja %l0\n"
-		: /* no output */
-	: /* no input */
-		: /* no clobber */
-		: gofurther3);
-gofurther:
-	asm("call  main");
-gofurther2:
-	asm("call  main");
+asm(R"(testfunc2:
+jne gofurther3
+cmpl   $0x0,0x10(%rip)
+ja gofurther4
+ja gofurther5
 gofurther3:
-	asm("call  main");
+	call  main
+gofurther4:
+	call  main
+gofurther5:
+	call  main
+)");
+extern "C" void testfunc2();
 
-}
+extern "C" void testfunc_lea();
+asm(R"(testfunc_lea:
+lea 0x123450(%rip),%ecx
+lea 0x123450(%rip),%rcx
+ret
+)");
 
-__attribute__((naked)) void testfunc_lea()
-{
-	asm("lea 0x123450(%rip),%ecx ");
-	//asm("cmpl   $0x0,0x10(%rip)");
-	asm goto ("jne %l0\n"
-		: /* no output */
-	: /* no input */
-		: /* no clobber */
-		: gofurther);
-	asm goto ("ja %l0\n"
-		: /* no output */
-	: /* no input */
-		: /* no clobber */
-		: gofurther2);
-	asm goto ("ja %l0\n"
-		: /* no output */
-	: /* no input */
-		: /* no clobber */
-		: gofurther3);
-gofurther:
-	asm("call  main");
-gofurther2:
-	asm("call  main");
-gofurther3:
-	asm("call  main");
-
-}
-
-__attribute__((naked)) void testfunc_call()
-{
-gofurther:
-	asm("call  main");
-gofurther2:
-	asm("call  main");
-gofurther3:
-	asm("call  main");
-
-}
+extern "C" void testfunc_call();
+asm(R"(testfunc_call:
+jmp main
+call  main
+ret
+)");
 
 void(*poldfunc2)();
 void(*poldfunc3)();
@@ -104,32 +56,62 @@ void test_replace2()
 	return poldfunc2();
 }
 
-typedef ssize_t(*ptrread)(int fd, void *buf, size_t nbytes);
-ptrread oldread;
 
-extern "C" ssize_t myread(int fd, void *buf, size_t nbytes)
-{
-	return 0;
-}
+
+
 
 int main()
 {
-	printf("%d\n",HookIt((void*)testfunc, (void**)&poldfunc, (void*)test_replace));
-	printf("%d\n", HookIt((void*)testfunc2, (void**)&poldfunc2, (void*)test_replace2));
-	printf("%d\n", HookIt((void*)testfunc_lea, (void**)&poldfunc3, (void*)test_replace2));
-	printf("%d\n", HookIt((void*)testfunc_call, (void**)&poldfunc4, (void*)test_replace2));
+	ZydisFormatter formatter;
+	ZydisFormatterInit(&formatter, ZYDIS_FORMATTER_STYLE_INTEL);
+	//ZydisFormatterSetProperty(&formatter, ZYDIS_FORMATTER_PROP_ADDR_FORMAT, ZYDIS_ADDR_FORMAT_RELATIVE_SIGNED);
+	ZydisDecoder decoder;
+	ZydisDecoderInit(
+		&decoder,
+		ZYDIS_MACHINE_MODE_LONG_64,
+		ZYDIS_ADDRESS_WIDTH_64);
 
-/*	void* pread = dlsym(RTLD_NEXT, "read");
-	if (!pread)
+	typedef void(*functype)();
+	auto disas = [&](functype f, int sz)
 	{
-		fprintf(stderr, "read not found\n");
-		exit(1);
-	}
-	HookStatus ret;
-	if ((ret = HookIt(pread, (void**)&oldread, (void*)myread)) != 0)
+		uint8_t* readPointer = (uint8_t*)f;
+		ZydisDecodedInstruction instruction;
+		while (ZYDIS_SUCCESS(ZydisDecoderDecodeBuffer(
+			&decoder, readPointer, 128, (uint64_t)readPointer, &instruction)))
+		{
+			char buffer[256];
+			ZydisFormatterFormatInstruction(
+				&formatter, &instruction, buffer, sizeof(buffer));
+			printf("0x%p: %s\n", readPointer, buffer);
+			sz--;
+			if (sz <= 0)
+				break;
+			readPointer += instruction.length;
+		}
+		printf("==============================\n");
+	};
+
+	
+	auto runtest = [&](const char* name,functype target, functype* old, functype newfunc)
 	{
-		fprintf(stderr, "Hook error %d\n", ret);
-		exit(1);
-	}*/
+		printf("==============================\n%s\n==============================\nBefore Hook:\n", name);
+		disas(target, 5);
+		auto ret = HookIt((void*)target, (void**)old, (void*)newfunc);
+		printf("Hook status=%d\n", ret);
+		if (ret == FHSuccess)
+		{
+			printf("After Hook:\n");
+			disas(target, 7);
+			printf("\nShadow Func:\n");
+			disas(*old, 10);
+		}
+	};
+
+	printf("main=%p\ntest_replace=%p\ntest_replace2=%p\n", main, test_replace, test_replace2);
+
+	runtest("testfunc", testfunc, &poldfunc, test_replace);
+	runtest("testfunc2", testfunc2, &poldfunc2, test_replace2);
+	runtest("testfunc_lea", testfunc_lea, &poldfunc3, test_replace2);
+	runtest("testfunc_call", testfunc_call, &poldfunc4, test_replace2);
 	return 0;
 }
