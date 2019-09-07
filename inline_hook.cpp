@@ -1,9 +1,8 @@
-﻿#include <unistd.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <dlfcn.h>
 #include <sys/mman.h>
 #include "Zydis/Zydis.h"
-//#include "util.h"
 #include<fcntl.h>
 #include <limits.h>
 #include "PFishHook.h"
@@ -24,6 +23,10 @@ inline size_t divide_and_ceil(size_t x, size_t y)
 inline void* AlignToPage(void* addr)
 {
 	return (void*)((uintptr_t)addr & ~(PageSize2 - 1));
+}
+inline void* AlignToPage_UP(void* addr)
+{
+	return (void*)(((uintptr_t)addr+PageSize2-1) & ~(PageSize2 - 1));
 }
 
 inline size_t AddressDiff(void* a, void* b)
@@ -72,7 +75,7 @@ Params:
 	pTarget - The target address to jmp to
 */
 
-void GenerateJmpLarge(char* pWriteTo, void* pTarget)
+void GenerateJmpLarge_old(char* pWriteTo, void* pTarget)
 {
 	*pWriteTo = 0x68;
 	pWriteTo += 1;
@@ -83,6 +86,17 @@ void GenerateJmpLarge(char* pWriteTo, void* pTarget)
 	*(uint32_t*)pWriteTo = uint32_t((uintptr_t)pTarget >> 32);
 	pWriteTo += 4;
 	*pWriteTo = 0xc3;
+}
+/*
+NOTE: use long far jmp
+jmp addr64
+ff 25 00 00 00 00 addr
+ */
+void GenerateJmpLarge(char* pWriteTo, void* pTarget)
+{
+	const char jmpl[]="\xff\x25\x00\x00\x00\x00";
+	memcpy(pWriteTo,jmpl,6);
+	memcpy(pWriteTo+6,&pTarget,8);
 }
 void GenerateJmp(char* pWriteTo, void* pTarget)
 {
@@ -119,177 +133,86 @@ int GetJmpLenLarge()
 Allocator definitions
 *//////////////////////////////////////////////////////
 
-#define ALIGN_SIZE 8
-#define ALLOC_SIZE (4096*2)
-struct MemChunk
-{
-	size_t allocated;
-	MemChunk* next;
-	char buffer[0];
-};
 
-static bool IsGoodMemChunk(MemChunk* chunk, void* addr, size_t sz)
-{
-	size_t alloc_sz = divide_and_ceil(sz, ALIGN_SIZE)*ALIGN_SIZE;
-	if (chunk->allocated + alloc_sz >= ALLOC_SIZE)
-		return false;
-	if (AddressDiff(addr, chunk->buffer + chunk->allocated) < ((1ULL << 31) - 1))
-		return true;
-	return false;
-}
-
-#define ALLOC_AVAILABLE (ALLOC_SIZE-sizeof(MemChunk))
-//#define mmap_bypass mmap
 #define mmap(a,b,c,d,e,f) syscall(SYS_mmap,a,b,c,d,e,f)
 #define munmap(a,b) syscall(SYS_munmap,a,b)
 #define mremap(a,b,c,d) syscall(SYS_mremap,a,b,c,d)
 
-struct MemPool{
-	size_t size;
+#define MCHUNK_SZ (8*1024*1024)
+#define MCHUNK_SZ2 (MCHUNK_SZ-sizeof(void*)-sizeof(size_t))
+struct MemChunk{
+	struct MemChunk* next;
 	size_t allocated;
-	char buffer[0];
+	char buffer[MCHUNK_SZ2];
+	char* alloc(size_t sz){
+		char* ret=nullptr;
+		if(allocated+sz<=MCHUNK_SZ2){
+			ret=buffer+allocated;
+			allocated+=sz;
+		}
+		return ret;
+	}
+	void init(){
+		next=nullptr;
+		allocated=0;
+		memset(buffer,0xcc,MCHUNK_SZ2);
+	}
 };
-static void* baseaddr=nullptr;
-#define BASE_ADDR_32BIT ((void*)1)
-static int InitMemPool(MemPool** pl, void* addr, size_t sz) {
-	if(addr == BASE_ADDR_32BIT)
-		*pl = (MemPool*)mmap(addr, sz, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
-	else
-		*pl = (MemPool*)mmap(addr, sz, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-	if (*pl == MAP_FAILED)
-	{
-		*pl = nullptr;
-		return -1;
+static_assert(sizeof(MemChunk)==MCHUNK_SZ);
+MemChunk* pPool=nullptr;
+#define ADDR_OK(x,y) (AddressDiff(x, y) < ((1ULL << 31) - 1))
+static char* TryAlloc(size_t sz,void* addr){
+	char* ret=nullptr;
+	for(MemChunk* now=pPool;now;now=now->next){
+		if(addr==nullptr || ADDR_OK(addr,now)){
+			ret=now->alloc(sz);
+			if(ret) return ret;
+		}
 	}
-	(*pl)->size = sz - sizeof(MemPool);
-	(*pl)->allocated = 0;
-	return 0;
-}
-static void DelMemPool( MemPool* pl,size_t sz){
-	munmap(pl,sz);
-}
-static void TrimMemPool(MemPool* pl,size_t sz){
-	mremap(pl,sz,pl->allocated+ sizeof(MemPool),0);
-	pl->size=pl->allocated;
-}
-static char* AllocMemPool(MemPool* pl, size_t sz) {
-	size_t alloc_sz = divide_and_ceil(sz, ALIGN_SIZE)*ALIGN_SIZE;
-	if (pl->allocated + alloc_sz > pl->size) return nullptr;
-	char* ret = pl->buffer + pl->allocated;
-	pl->allocated += alloc_sz;
-	memset(ret, 0xcc, alloc_sz);
 	return ret;
 }
-static MemChunk * FuncBuffer = nullptr;
-static MemPool* AllocELF=nullptr;
-static MemPool* AllocLIB=nullptr;
-#define BUFFER_SZ 0x800000//8MB
-
-void TrimAll(){
-	if(AllocELF) TrimMemPool(AllocELF,AllocELF->size+ sizeof(MemPool));
-	if(AllocLIB) TrimMemPool(AllocLIB,AllocLIB->size+ sizeof(MemPool));
-}
-
-/*/////////////////////////////////////////////////////
-Allocator definitions Ends
-*//////////////////////////////////////////////////////
-
-
-static char* AllocFuncMemChunk(size_t sz, void* addr)
-{
-
-	//static size_t cur_len=0;
-	MemChunk *chunk = (MemChunk*)FuncBuffer;
-	char* ret = nullptr;
-
-	//first find a memory chunk near to the address
-	//if not found, allocate one
-	MemChunk **pcur = &FuncBuffer;
-	bool found = false;
-	while (*pcur)
-	{
-		if(IsGoodMemChunk(*pcur,addr,sz))
-		{
-			chunk = *pcur;
-			found = true;
-			break;
-		}
-		pcur = &(*pcur)->next; //we still need to find the tail of the list
+static MemChunk* TryCreateChunk(void* address){
+	/*
+	 search a proper place
+	 search backwards so that it won't overlap the memory for stack or heap 
+	 */
+	auto flags=MAP_PRIVATE | MAP_ANONYMOUS ;
+	uintptr_t addr=reinterpret_cast<uintptr_t>(address);
+	if(addr==0){
+		MemChunk* res=(MemChunk*)mmap(addr, MCHUNK_SZ, PROT_READ | PROT_WRITE | PROT_EXEC,flags,-1,0);
+		res->init();
+		return res;
 	}
-	if (!found)
-	{
-		if ((uintptr_t)addr >> 32 == 0) //if the suggested addr is in lower 4g address
-		{
-			chunk = (MemChunk*)mmap(addr, ALLOC_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+	if(((uintptr_t)addr >> 32) == 0 && addr!=0) flags|= MAP_32BIT;
+	for(;addr>(MCHUNK_SZ<<1);addr-=(MCHUNK_SZ<<1)){
+		MemChunk* res=(MemChunk*)mmap(addr, MCHUNK_SZ, PROT_READ | PROT_WRITE | PROT_EXEC,flags,-1,0);
+		if(ADDR_OK(res,reinterpret_cast<void*>(addr))){
+			res->init();
+			return res;
 		}
-		else
-		{
-			chunk = (MemChunk*)mmap(addr, ALLOC_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-		}
-		if (chunk == MAP_FAILED)
-			return nullptr;
-		chunk->next = nullptr;
-		chunk->allocated = 0;
-		*pcur = chunk; //append the new chunk to the tail of the list
-		if (AddressDiff(chunk->buffer, addr) >= ((1ULL << 31) - 1)) //if still cannot find
-			return nullptr;
+		munmap(res,MCHUNK_SZ);
 	}
-
-	size_t alloc_sz = divide_and_ceil(sz, ALIGN_SIZE)*ALIGN_SIZE;
-
-	if (chunk->allocated + alloc_sz >= ALLOC_SIZE)
-		return nullptr;
-	ret = chunk->buffer + chunk->allocated;
-	chunk->allocated += alloc_sz;
-	memset(ret, 0xcc, alloc_sz);
-
-	return ret;
+	return nullptr;
 }
-
-/*
-Alloc the "jump space" for old function head
-*/
 static char* AllocFunc(size_t sz, void* addr)
 {
-	//	printf("baseaddr %p needle %p\n",baseaddr,addr);
-#define ADDR_OK(x,y) (AddressDiff(x, y) < ((1ULL << 31) - 1))
-	if (AllocLIB == nullptr) {
-		int tmp = InitMemPool(&AllocLIB, nullptr, BUFFER_SZ);
-		if (tmp == -1) return nullptr;
+	char* ret=nullptr;
+	ret=TryAlloc(sz,addr);
+	if(ret) return ret;
+	//create chunk
+	MemChunk* res=TryCreateChunk(addr);
+	if(!res){
+		return nullptr;
 	}
-	if (addr == nullptr || ADDR_OK(AllocLIB->buffer + AllocLIB->allocated, addr))
-	{
-		char * ret = AllocMemPool(AllocLIB, sz);
-		if (ret)
-			return ret;
-	}
+	if(!pPool) pPool=res; else pPool->next=res;
+	return TryAlloc(sz,addr);
+}
 
-	if (AllocELF == nullptr) {
-		int tmp = InitMemPool(&AllocELF, baseaddr, BUFFER_SZ);
-		if (tmp == -1) return nullptr;
-	}
-	if (ADDR_OK(addr, AllocELF->buffer + AllocELF->allocated))
-	{
-		char* ret = AllocMemPool(AllocELF, sz);
-		if (ret)
-			return ret;
-	}
-
-	//finally fallback to get memory from MemChunk
-	return AllocFuncMemChunk(sz, addr);
 #undef ADDR_OK
-}
 
-
-void* GetELFAddr(){
-	char buf[256];
-	int fd=syscall(SYS_open,"/proc/self/maps",O_RDONLY);
-	syscall(SYS_read,fd,buf,256);
-	syscall(SYS_close,fd);
-	void* ret;
-	sscanf(buf,"%p",&ret);
-	return ret;
-}
+/*/////////////////////////////////////////////////////
+End Allocator definitions
+*//////////////////////////////////////////////////////
 
 enum PatchType
 {
@@ -325,6 +248,15 @@ inline bool InsertPatchPoint(PatchInfo* pool, int& num_patch_points, PatchType t
 	}\
 }while (0);
 
+
+static inline HookStatus rangeProtect(void* start,size_t size,int wrable){
+	auto start2=AlignToPage(start);
+	auto end=AlignToPage_UP((char*)(start)+size);
+	if(mprotect(start2,(char*)end-(char*)start2,PROT_READ|PROT_EXEC|(wrable?PROT_WRITE:0))<0)
+		return FHMprotectFail;
+	return FHSuccess;
+}
+
 /*
 Do Hook. It will replace the head of the function "oldfunc" with a "jmp" to the function "newfunc",
 and copy the the head of the function "oldfunc" to newly alloacted space ("jump space"), returning the pointer to
@@ -341,14 +273,6 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 		ZydisFormatterInit(&formatter, ZYDIS_FORMATTER_STYLE_INTEL);
 		ptrParseOperandMem = ParseOperandMem;
 		ZydisFormatterSetHook(&formatter, ZYDIS_FORMATTER_HOOK_FORMAT_OPERAND_MEM, (const void**)&ptrParseOperandMem);
-		baseaddr = GetELFAddr();
-		if((uintptr_t)baseaddr>>32!=0){
-			//64 bit address
-			baseaddr=(void*)((uintptr_t)baseaddr-(uintptr_t)BUFFER_SZ);
-		}else{
-			//for 32-bit address, assign a special address to mark it
-			baseaddr = BASE_ADDR_32BIT;
-		}
 	}
 	ZydisDecoder decoder;
 	ZydisDecoderInit(
@@ -359,7 +283,6 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 	uint64_t instructionPointer = (uint64_t)oldfunc;
 	uint8_t* readPointer = (uint8_t*)oldfunc;
 	size_t length = 0;
-
 
 	int patch_jump_bed_size = 0;
 	//we first check the head of oldfunc. We use the disassembler to 
@@ -509,22 +432,13 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 
 	*poutold = (void*)outfunc;
 	//Let the pages of oldfunc writable
-	for (uintptr_t start = (uintptr_t)AlignToPage(oldfunc); start <= (uintptr_t)AlignToPage((char*)oldfunc + length - 1); start += PageSize2)
-	{
-		if (mprotect(AlignToPage(oldfunc), PageSize2, PROT_READ | PROT_EXEC | PROT_WRITE)<0)
-			return FHMprotectFail;
-	}
-
+	if(rangeProtect(oldfunc,length,1)!=FHSuccess) return FHMprotectFail;
 	//replace the head of oldfunc with newfunc
 	GenerateJmp((char*)oldfunc, newfunc);
 	//fill the gap with "int 3"
 	memset((char*)oldfunc+ GetJmpLen((char*)oldfunc, newfunc), 0xcc, length- GetJmpLen((char*)oldfunc, newfunc));
 	//restore the protection
-	for (uintptr_t start = (uintptr_t)AlignToPage(oldfunc); start <= (uintptr_t)AlignToPage((char*)oldfunc + length - 1); start += PageSize2)
-	{
-		if (mprotect(AlignToPage(oldfunc), PageSize2, PROT_READ | PROT_EXEC )<0)
-			return FHMprotectFail;
-	}
+	if(rangeProtect(oldfunc,length,0)!=FHSuccess) return FHMprotectFail;
 	return FHSuccess;
 }
 
@@ -537,18 +451,8 @@ HookStatus UnHook(void* oldfunc, void* func)
 {
 	//todo : reset patch
 	size_t length = *((size_t*)func - 1);
-	for (uintptr_t start = (uintptr_t)AlignToPage(oldfunc); start <= (uintptr_t)AlignToPage((char*)oldfunc + length - 1); start += PageSize2)
-	{
-		if (mprotect(AlignToPage(oldfunc), PageSize2, PROT_READ | PROT_EXEC | PROT_WRITE)<0)
-			return FHMprotectFail;
-	}
-
-	memcpy(oldfunc, func, length);
-
-	for (uintptr_t start = (uintptr_t)AlignToPage(oldfunc); start <= (uintptr_t)AlignToPage((char*)oldfunc + length - 1); start += PageSize2)
-	{
-		if (mprotect(AlignToPage(oldfunc), PageSize2, PROT_READ | PROT_EXEC)<0)
-			return FHMprotectFail;
-	}
+	if(rangeProtect(oldfunc,length,1)!=FHSuccess) return FHMprotectFail;
+	memcpy(oldfunc,func,length);
+	if(rangeProtect(oldfunc,length,0)!=FHSuccess) return FHMprotectFail;
 	return FHSuccess;
 }
