@@ -20,10 +20,12 @@ inline size_t divide_and_ceil(size_t x, size_t y)
 	return 1 + ((x - 1) / y);
 }
 
+//align to the floor page
 inline void* AlignToPage(void* addr)
 {
 	return (void*)((uintptr_t)addr & ~(PageSize2 - 1));
 }
+//align to the ceil page
 inline void* AlignToPage_UP(void* addr)
 {
 	return (void*)(((uintptr_t)addr+PageSize2-1) & ~(PageSize2 - 1));
@@ -64,33 +66,10 @@ static ZydisStatus ParseOperandMem(const ZydisFormatter* formatter, ZydisString*
 };*/
 
 /*
-Generate "Far jmp" in x64. Generated code are :
-	push (lower 32 bits of the target)
-	mov dword ptr ss:[rsp+4],(higher 32 bits of the target)
-	ret
-Thanks for "yes2". Reference http://blog.csdn.net/yes2/article/details/50580384
-Params:
-	pWriteTo - The address to store the generated code. Use GetJmpLen()
-		to get the length of instructions to be gengerated
-	pTarget - The target address to jmp to
-*/
-
-void GenerateJmpLarge_old(char* pWriteTo, void* pTarget)
-{
-	*pWriteTo = 0x68;
-	pWriteTo += 1;
-	*(uint32_t*)pWriteTo = uint32_t((uintptr_t)pTarget & 0xffffffff);
-	pWriteTo += 4;
-	*(uint32_t*)pWriteTo = 0x042444c7;
-	pWriteTo += 4;
-	*(uint32_t*)pWriteTo = uint32_t((uintptr_t)pTarget >> 32);
-	pWriteTo += 4;
-	*pWriteTo = 0xc3;
-}
-/*
-NOTE: use long far jmp
+NOTE: use long indirect far jmp
 jmp addr64
 ff 25 00 00 00 00 addr
+size=6+8=14
  */
 void GenerateJmpLarge(char* pWriteTo, void* pTarget)
 {
@@ -98,6 +77,7 @@ void GenerateJmpLarge(char* pWriteTo, void* pTarget)
 	memcpy(pWriteTo,jmpl,6);
 	memcpy(pWriteTo+6,&pTarget,8);
 }
+
 void GenerateJmp(char* pWriteTo, void* pTarget)
 {
 	if (AddressDiff(pWriteTo+5, pTarget) < ((1ULL << 31) - 1))
@@ -184,7 +164,8 @@ static MemChunk* TryCreateChunk(void* address){
 		return res;
 	}
 	if(((uintptr_t)addr >> 32) == 0 && addr!=0) flags|= MAP_32BIT;
-	for(;addr>(MCHUNK_SZ<<1);addr-=(MCHUNK_SZ<<1)){
+	const uintptr_t search_step=(MCHUNK_SZ<<1);
+	for(;addr>search_step;addr-=search_step){
 		MemChunk* res=(MemChunk*)mmap(addr, MCHUNK_SZ, PROT_READ | PROT_WRITE | PROT_EXEC,flags,-1,0);
 		if(ADDR_OK(res,reinterpret_cast<void*>(addr))){
 			res->init();
@@ -249,7 +230,7 @@ inline bool InsertPatchPoint(PatchInfo* pool, int& num_patch_points, PatchType t
 }while (0);
 
 
-static inline HookStatus rangeProtect(void* start,size_t size,int wrable){
+static inline HookStatus RangeProtect(void* start,size_t size,int wrable){
 	auto start2=AlignToPage(start);
 	auto end=AlignToPage_UP((char*)(start)+size);
 	if(mprotect(start2,(char*)end-(char*)start2,PROT_READ|PROT_EXEC|(wrable?PROT_WRITE:0))<0)
@@ -290,6 +271,8 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 	//to hold our "jmp" instructions
 	hasRIP = false;
 	ZydisDecodedInstruction instruction;
+	const int jmplen=GetJmpLen(oldfunc,newfunc);
+	uint8_t* QWORDPointer=nullptr;
 	while (ZYDIS_SUCCESS(ZydisDecoderDecodeBuffer(
 		&decoder, readPointer, 128, instructionPointer, &instruction)))
 	{
@@ -307,8 +290,23 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 					{
 						FHASSERT(instruction.raw.disp.size == 32, instruction.instrAddress);
 						patched = true;
+						/*
+						NOTE: We might meet jmp QWORD PTR [rip].While this instr reads mem at rip+6 (we will modify this address),
+						we should copy QWORD rip+6 to shadow function
+						 */
+						auto pOffset=(int32_t*)(readPointer + instruction.raw.disp.offset);
+						auto word_offset=(readPointer + *pOffset) - (uint8_t*)oldfunc+instruction.length;
+						//printf("off %d\n",*pOffset);
+						//jmpq QWORD ptr [rip+0] (6) QWORD (8)
+						if(word_offset<jmplen && instruction.mnemonic>=ZYDIS_MNEMONIC_JB && instruction.mnemonic<=ZYDIS_MNEMONIC_JZ){
+							//Uhh We should copy this word to shadow function
+							//In most cases,This only happen when a function is hooked
+							FHASSERT(QWORDPointer==nullptr,instruction.instrAddress);
+							QWORDPointer=readPointer+(*pOffset)+instruction.length;
+						}else{
 						if (InsertPatchPoint(PatchInfoPool, num_patch_points, FHPatchLoad32, (readPointer + instruction.raw.disp.offset) - (uint8_t*)oldfunc))
 							return FHTooManyPatches;
+						}
 					}
 				}
 				else if (operand->type == ZYDIS_OPERAND_TYPE_IMMEDIATE)
@@ -341,13 +339,17 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 			}	
 			FHASSERT(patched, instruction.instrAddress);
 		}
+		if(readPointer+instruction.length==QWORDPointer){
+			instruction.length+=8;
+			//skip the QWORD
+		}
 		readPointer += instruction.length;
 		length += instruction.length;
-		if (length >= GetJmpLen(oldfunc,newfunc))
+		if (length >= jmplen)
 			break;
 		instructionPointer += instruction.length;
 	}
-	if (length < GetJmpLen(oldfunc, newfunc))
+	if (length < jmplen)
 		return FHDecodeFailed;
 
 	//now "length" is the length of instructions in oldfunc to be replaced
@@ -366,7 +368,6 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 	//record the length of replaced instructions
 	*(size_t*)outfunc = length;
 	outfunc += sizeof(size_t);
-
 	//copy oldfunc's first several instructions to the jump space
 	memcpy(outfunc, oldfunc, length);
 	//generate a "jmp" back to oldfunc's body
@@ -432,17 +433,15 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 
 	*poutold = (void*)outfunc;
 	//Let the pages of oldfunc writable
-	if(rangeProtect(oldfunc,length,1)!=FHSuccess) return FHMprotectFail;
+	if(RangeProtect(oldfunc,length,1)!=FHSuccess) return FHMprotectFail;
 	//replace the head of oldfunc with newfunc
 	GenerateJmp((char*)oldfunc, newfunc);
 	//fill the gap with "int 3"
 	memset((char*)oldfunc+ GetJmpLen((char*)oldfunc, newfunc), 0xcc, length- GetJmpLen((char*)oldfunc, newfunc));
 	//restore the protection
-	if(rangeProtect(oldfunc,length,0)!=FHSuccess) return FHMprotectFail;
+	if(RangeProtect(oldfunc,length,0)!=FHSuccess) return FHMprotectFail;
 	return FHSuccess;
 }
-
-
 HookStatus HookIt(void* oldfunc, void** poutold, void* newfunc)
 {
 	return HookItSafe(oldfunc, poutold, newfunc, 1,nullptr);
@@ -451,8 +450,8 @@ HookStatus UnHook(void* oldfunc, void* func)
 {
 	//todo : reset patch
 	size_t length = *((size_t*)func - 1);
-	if(rangeProtect(oldfunc,length,1)!=FHSuccess) return FHMprotectFail;
+	if(RangeProtect(oldfunc,length,1)!=FHSuccess) return FHMprotectFail;
 	memcpy(oldfunc,func,length);
-	if(rangeProtect(oldfunc,length,0)!=FHSuccess) return FHMprotectFail;
+	if(RangeProtect(oldfunc,length,0)!=FHSuccess) return FHMprotectFail;
 	return FHSuccess;
 }
