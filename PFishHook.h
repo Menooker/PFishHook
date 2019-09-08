@@ -16,8 +16,6 @@ extern "C" {
 #endif
  HookStatus HookIt(void* oldfunc, void** poutold, void* newfunc);
  HookStatus UnHook(void* oldfunc, void* func);
- void* GetELFAddr();
- void TrimAll();
 
 #ifdef __cplusplus 
 }
