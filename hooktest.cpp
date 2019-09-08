@@ -51,6 +51,27 @@ ret
 void(*poldfunc2)();
 void(*poldfunc3)();
 void(*poldfunc4)();
+void(*poldfunc5)();
+void(*poldfunc6)();
+void(*poldfunc7)();
+void test_dummy(){
+	printf("DUMMY: orig func\n");
+}
+void test_replace_d()
+{
+printf("shadow 1\n");
+	return poldfunc5();
+}
+void test_replace_d2()
+{
+	printf("shadow 2\n");
+	return poldfunc6();
+}
+void test_replace_d3()
+{
+	printf("shadow 3\n");
+	return poldfunc7();
+}
 void test_replace2()
 {
 	return poldfunc2();
@@ -113,5 +134,10 @@ int main()
 	runtest("testfunc2", testfunc2, &poldfunc2, test_replace2);
 	runtest("testfunc_lea", testfunc_lea, &poldfunc3, test_replace2);
 	runtest("testfunc_call", testfunc_call, &poldfunc4, test_replace2);
+	//test for dup hooks
+	runtest("testfunc_dup", test_dummy, &poldfunc5, test_replace_d);
+	runtest("testfunc_dup2", test_dummy, &poldfunc6, test_replace_d2);
+	runtest("testfunc_dup3", test_dummy, &poldfunc7, test_replace_d3);
+	test_dummy();
 	return 0;
 }
