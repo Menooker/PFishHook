@@ -5,33 +5,15 @@ PFishHook can help you intercept calls to a function, and replace the the target
 
 ## Build instructions
 PFishHook depends on Zydis, a Fast and lightweight x86/x86-64 disassembler library. First, you need to build Zydis.
-Note: if you want to use PFishHook in a shared library, you need to compile Zydis with compiler flag "-fPIC". To do so, add a line 
-```cmake
-set(CMAKE_C_FLAGS  "${CMAKE_C_FLAGS} -fPIC")
-```
-in Zydis's CMakeLists.txt.
-
-Compile Zydis:
 ```shell
-git clone https://github.com/zyantific/zydis
-cd zydis
-git reset --hard 9ec1e0c4d17bf08f17575e25b0c2cf70c5cc879b
-mkdir build && cd build
-echo "set(CMAKE_C_FLAGS  \"${CMAKE_C_FLAGS} -fPIC\")" >>../CMakeLists.txt
+git submodule init
+git submodule update
+mkdir build
+cd build
 cmake ..
-make -j4
-cp ZydisExportConfig.h ../include
+make
 ```
-
-Then compile PFishHook:
-```shell
-cd ..
-git clone https://github.com/Menooker/PFishHook
-cd PFishHook
-make directories
-make lib INCLUDE=../zydis/include LIBPATH=../zydis/build
-```
-Now, you can find libPFishHook.a in "bin" directory. To compile with PFishHook,you should add bin/libPFishHook.a to your files.
+Now, you can find libPFishHook.a in "build" directory. To compile with PFishHook, you should add build/libPFishHook.a and build/3rdparty/zydis/libZydis.a to your link arguments.
 
 ## How to use
 
@@ -83,7 +65,7 @@ The "shadown function" has the same functionality of the original function.
 
 ## Limitations and known issues
  * PFishHook can only deal with functions with length at least 14 bytes (which is the size of "jump" instructions).
- * Some Linux syscall wrapper functions like "read" has RIP-relative instructions in the function's head. We move the function's head to the shadow function, so the RIP has change. In this case, we need to patch RIP-relative instructions' displacement. Some of the instructions has been patched in PFishHooks. However, many others are not yet patched.
+ * Some Linux syscall wrapper functions like "read" has RIP-relative instructions in the function's head. We move the function's head to the shadow function, so the RIP has change. In this case, we need to patch RIP-relative instructions' displacement.
  * PFishHook do not allow any jumps into the middle of replaced (hooked) funcion head.
 
 Users should check the functions to hook carefully to see whether the function violates the above limitations.

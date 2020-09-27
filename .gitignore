@@ -4,3 +4,5 @@ include/*
 *.a
 *.s
 hooktest
+3rdparty/*
+build/*
