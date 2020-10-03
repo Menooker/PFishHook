@@ -6,6 +6,7 @@
 #include <utility>
 
 #define def_name(_name,_ret_type,...) struct Name_##_name{ static constexpr char const* name = #_name;typedef _ret_type return_type; typedef OldFuncWrapper<Name_##_name,_ret_type,__VA_ARGS__> func_wrapper;};
+#define def_name_no_arg(_name,_ret_type) struct Name_##_name{ static constexpr char const* name = #_name;typedef _ret_type return_type; typedef OldFuncWrapper<Name_##_name,_ret_type> func_wrapper;};
 #define get_name(_name) Name_##_name;
 
 
