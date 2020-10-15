@@ -8,6 +8,7 @@
 #define def_name(_name,_ret_type,...) struct Name_##_name{ static constexpr char const* name = #_name;typedef _ret_type return_type; typedef OldFuncWrapper<Name_##_name,_ret_type,__VA_ARGS__> func_wrapper;};
 #define def_name_no_arg(_name,_ret_type) struct Name_##_name{ static constexpr char const* name = #_name;typedef _ret_type return_type; typedef OldFuncWrapper<Name_##_name,_ret_type> func_wrapper;};
 #define get_name(_name) Name_##_name;
+#define auto_hook(_name, _func) AutoHook<Name_##_name, _func> __hook_auto_##_name;
 
 
 extern bool init_called;
@@ -43,8 +44,6 @@ namespace FishHook
 			return func(std::forward<TTypes>(args)...);
 		}
 	};
-
-
 
 	template <typename TName, typename... TTypes>
 	typename TName::return_type CallOld(TTypes... args)
@@ -91,8 +90,6 @@ namespace FishHook
 		void* dummy;
 		if (libother != libc)
 			_DoHook(libother, (void**)&dummy, (void*)replacement_func);
-		//else
-		//	fprintf(stderr, "Function address is the same %s\n", TName::name);
 	}
 
 	template <typename TName>
@@ -100,4 +97,15 @@ namespace FishHook
 	{
 		_DoHook(GetFuncAddress(RTLD_NEXT, TName::name), (void**)&TName::func_wrapper::old_func, (void*)replacement_func);
 	}
+
+	extern void* GetLibCHandle();
+	extern void* GetOtherHandle();
+	template <typename TName, typename TName::func_wrapper::ptrFunc replacement_func>
+	struct AutoHook
+	{
+		AutoHook() {
+			DoHookInLibAndLibC<TName>(GetLibCHandle(), GetOtherHandle(),replacement_func );
+		}
+	};
+
 }
