@@ -1,7 +1,9 @@
+#include <string.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <dlfcn.h>
 #include <sys/mman.h>
+#include "Zycore/String.h"
 #include "Zydis/Zydis.h"
 #include<fcntl.h>
 #include <limits.h>
@@ -10,9 +12,9 @@
 #include<sys/syscall.h>
 
 
-static size_t PageSize2= 0;
+static size_t PageSize= 0;
 static ZydisFormatter formatter;
-static ZydisStatus (*ptrParseOperandMem)(const ZydisFormatter* formatter, ZydisString* string,
+static ZyanStatus (*ptrParseOperandMem)(const ZydisFormatter* formatter, ZyanString* string,
 	const ZydisDecodedInstruction* instruction, const ZydisDecodedOperand* operand, void* userData);
 
 inline size_t divide_and_ceil(size_t x, size_t y)
@@ -23,12 +25,12 @@ inline size_t divide_and_ceil(size_t x, size_t y)
 //align to the floor page
 inline void* AlignToPage(void* addr)
 {
-	return (void*)((uintptr_t)addr & ~(PageSize2 - 1));
+	return (void*)((uintptr_t)addr & ~(PageSize - 1));
 }
 //align to the ceil page
 inline void* AlignToPage_UP(void* addr)
 {
-	return (void*)(((uintptr_t)addr+PageSize2-1) & ~(PageSize2 - 1));
+	return (void*)(((uintptr_t)addr+PageSize-1) & ~(PageSize - 1));
 }
 
 inline size_t AddressDiff(void* a, void* b)
@@ -47,10 +49,10 @@ static bool hasRIP = false;
 /*
 The function to check if there is RIP-relative memory loads in the instruction
 */
-static ZydisStatus ParseOperandMem(const ZydisFormatter* formatter, ZydisString* string,
+static ZyanStatus ParseOperandMem(const ZydisFormatter* formatter, ZyanString* string,
 	const ZydisDecodedInstruction* instruction, const ZydisDecodedOperand* operand, void* userData)
 {
-	if (operand->mem.disp.hasDisplacement && (
+	if (operand->mem.disp.has_displacement && (
 		(operand->mem.base == ZYDIS_REGISTER_EIP) ||
 		(operand->mem.base == ZYDIS_REGISTER_RIP)) &&
 		(operand->mem.index == ZYDIS_REGISTER_NONE) && (operand->mem.scale == 0))
@@ -248,18 +250,18 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 	int num_patch_points = 0;
 	static PatchInfo PatchInfoPool[MAX_PATCH_POINTS];
 
-	if (PageSize2 == 0)
+	if (PageSize == 0)
 	{
-		PageSize2 = sysconf(_SC_PAGESIZE);
+		PageSize = sysconf(_SC_PAGESIZE);
 		ZydisFormatterInit(&formatter, ZYDIS_FORMATTER_STYLE_INTEL);
 		ptrParseOperandMem = ParseOperandMem;
-		ZydisFormatterSetHook(&formatter, ZYDIS_FORMATTER_HOOK_FORMAT_OPERAND_MEM, (const void**)&ptrParseOperandMem);
+		ZydisFormatterSetHook(&formatter, ZYDIS_FORMATTER_FUNC_FORMAT_OPERAND_MEM, (const void**)&ptrParseOperandMem);
 	}
 	ZydisDecoder decoder;
 	ZydisDecoderInit(
 		&decoder,
 		ZYDIS_MACHINE_MODE_LONG_64,
-		ZYDIS_ADDRESS_WIDTH_64);
+		ZYDIS_STACK_WIDTH_64);
 	
 	uint64_t instructionPointer = (uint64_t)oldfunc;
 	uint8_t* readPointer = (uint8_t*)oldfunc;
@@ -273,22 +275,23 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 	ZydisDecodedInstruction instruction;
 	const int jmplen=GetJmpLen(oldfunc,newfunc);
 	uint8_t* QWORDPointer=nullptr;
-	while (ZYDIS_SUCCESS(ZydisDecoderDecodeBuffer(
-		&decoder, readPointer, 128, instructionPointer, &instruction)))
+	ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
+	while (ZYAN_SUCCESS(ZydisDecoderDecodeFull(
+		&decoder, readPointer, 128, &instruction, operands)))
 	{
 		bool patched = false;
 		if (instruction.attributes & ZYDIS_ATTRIB_IS_RELATIVE)
 		{
-			FHASSERT(instruction.operandCount >= 1, instruction.instrAddress);
-			for (int i = 0; i < instruction.operandCount; i++) //for all operands, check if it is RIP-relative
+			FHASSERT(instruction.operand_count >= 1, instructionPointer);
+			for (int i = 0; i < instruction.operand_count; i++) //for all operands, check if it is RIP-relative
 			{
-				auto operand = &instruction.operands[i];
-				if (operand->type == ZYDIS_OPERAND_TYPE_MEMORY && operand->mem.disp.hasDisplacement)
+				auto operand = &operands[i];
+				if (operand->type == ZYDIS_OPERAND_TYPE_MEMORY && operand->mem.disp.has_displacement)
 				{
-					FHASSERT(operand->mem.base != ZYDIS_REGISTER_EIP, instruction.instrAddress);
+					FHASSERT(operand->mem.base != ZYDIS_REGISTER_EIP, instructionPointer);
 					if (operand->mem.base == ZYDIS_REGISTER_RIP)
 					{
-						FHASSERT(instruction.raw.disp.size == 32, instruction.instrAddress);
+						FHASSERT(instruction.raw.disp.size == 32, instructionPointer);
 						patched = true;
 						/*
 						NOTE: We might meet jmp QWORD PTR [rip].While this instr reads mem at rip+6 (we will modify this address),
@@ -301,7 +304,7 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 						if(word_offset<jmplen && instruction.mnemonic>=ZYDIS_MNEMONIC_JB && instruction.mnemonic<=ZYDIS_MNEMONIC_JZ){
 							//Uhh We should copy this word to shadow function
 							//In most cases,This only happen when a function is hooked
-							FHASSERT(QWORDPointer==nullptr,instruction.instrAddress);
+							FHASSERT(QWORDPointer==nullptr, instructionPointer);
 							QWORDPointer=readPointer+(*pOffset)+instruction.length;
 						}else{
 						if (InsertPatchPoint(PatchInfoPool, num_patch_points, FHPatchLoad32, (readPointer + instruction.raw.disp.offset) - (uint8_t*)oldfunc))
@@ -311,7 +314,7 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 				}
 				else if (operand->type == ZYDIS_OPERAND_TYPE_IMMEDIATE)
 				{
-					if (operand->imm.isSigned && operand->imm.isRelative)
+					if (operand->imm.is_signed && operand->imm.is_relative)
 					{
 						if (instruction.raw.imm[0].size == 8)
 						{
@@ -332,12 +335,12 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 						}
 						else
 						{
-							FHASSERT(0, instruction.instrAddress);
+							FHASSERT(0, instructionPointer);
 						}
 					}
 				}
 			}	
-			FHASSERT(patched, instruction.instrAddress);
+			FHASSERT(patched, instructionPointer);
 		}
 		if(readPointer+instruction.length==QWORDPointer){
 			instruction.length+=8;

@@ -1,4 +1,5 @@
 #include "PFishHook.h"
+#include "Zydis/SharedTypes.h"
 #include <Zydis/Zydis.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -90,24 +91,28 @@ int main()
 	ZydisDecoderInit(
 		&decoder,
 		ZYDIS_MACHINE_MODE_LONG_64,
-		ZYDIS_ADDRESS_WIDTH_64);
+		ZYDIS_STACK_WIDTH_64);
 
 	typedef void(*functype)();
 	auto disas = [&](functype f, int sz)
 	{
 		uint8_t* readPointer = (uint8_t*)f;
 		ZydisDecodedInstruction instruction;
-		while (ZYDIS_SUCCESS(ZydisDecoderDecodeBuffer(
-			&decoder, readPointer, 128, (uint64_t)readPointer, &instruction)))
+		ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
+		uint64_t instructionPointer = (uint64_t)f;
+		while (ZYAN_SUCCESS(ZydisDecoderDecodeFull(
+			&decoder, readPointer, 128, &instruction, operands)))
 		{
 			char buffer[256];
 			ZydisFormatterFormatInstruction(
-				&formatter, &instruction, buffer, sizeof(buffer));
+				&formatter, &instruction, operands, instruction.operand_count,
+				buffer, sizeof(buffer), instructionPointer, nullptr);
 			printf("0x%p: %s\n", readPointer, buffer);
 			sz--;
 			if (sz <= 0)
 				break;
 			readPointer += instruction.length;
+			instructionPointer += instruction.length;
 		}
 		printf("==============================\n");
 	};
