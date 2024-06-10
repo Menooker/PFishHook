@@ -1,148 +1,82 @@
 #include "PFishHook.h"
-#include "Zydis/SharedTypes.h"
-#include <Zydis/Zydis.h>
+#include <pthread.h>
 #include <stdio.h>
-#include <stdint.h>
+#include <dlfcn.h>
+#include <stdlib.h>
+#include <netdb.h>
 
-int main();
+typedef void (*quick_exit_t)(int status);
+static quick_exit_t quick_exit_f = nullptr;
 
-asm("testfunc:\n\
-ja gofurther2\n\
-gofurther:\n\
-	call  main\n\
-gofurther2:\n\
-	call  main\n\
-");
-extern "C" void testfunc();
-
-void(*poldfunc)();
-void test_replace()
-{
-	return poldfunc();
+void quick_exit_call(int status) {
+	printf("hook quick exit\n");
+	quick_exit_f(status);
 }
 
-asm(R"(testfunc2:
-jne gofurther3
-cmpl   $0x0,0x10(%rip)
-ja gofurther4
-ja gofurther5
-gofurther3:
-	call  main
-gofurther4:
-	call  main
-gofurther5:
-	call  main
-)");
-extern "C" void testfunc2();
+typedef void (*pthread_exit_t) (void *__retval);
+static pthread_exit_t pthread_exit_f = nullptr;
 
-extern "C" void testfunc_lea();
-asm(R"(testfunc_lea:
-lea 0x123450(%rip),%ecx
-lea 0x123450(%rip),%rcx
-ret
-)");
-
-extern "C" void testfunc_call();
-asm(R"(testfunc_call:
-jmp main
-call  main
-ret
-)");
-
-void(*poldfunc2)();
-void(*poldfunc3)();
-void(*poldfunc4)();
-void(*poldfunc5)();
-void(*poldfunc6)();
-void(*poldfunc7)();
-void test_dummy(){
-	printf("DUMMY: orig func\n");
-}
-void test_replace_d()
-{
-printf("shadow 1\n");
-	return poldfunc5();
-}
-void test_replace_d2()
-{
-	printf("shadow 2\n");
-	return poldfunc6();
-}
-void test_replace_d3()
-{
-	printf("shadow 3\n");
-	return poldfunc7();
-}
-void test_replace2()
-{
-	return poldfunc2();
+void pthread_exit_call(void *__retval) {
+	printf("hook pthread_exit\n");
+	pthread_exit_f(__retval);
 }
 
+typedef void (*endprotoent_t)(void);
+static endprotoent_t endprotoent_f = nullptr;
 
-
-
+void endprotoent_call() {
+	printf("hook endprotoent\n");
+	endprotoent_f();
+}
 
 int main()
 {
-	ZydisFormatter formatter;
-	ZydisFormatterInit(&formatter, ZYDIS_FORMATTER_STYLE_INTEL);
-	//ZydisFormatterSetProperty(&formatter, ZYDIS_FORMATTER_PROP_ADDR_FORMAT, ZYDIS_ADDR_FORMAT_RELATIVE_SIGNED);
-	ZydisDecoder decoder;
-	ZydisDecoderInit(
-		&decoder,
-		ZYDIS_MACHINE_MODE_LONG_64,
-		ZYDIS_STACK_WIDTH_64);
+	HookStatus ret;
+	/*
+	Dump of assembler code for function quick_exit:
+	0x00007ffff78434b0 <+0>:     48 8d 35 49 a1 38 00    lea    0x38a149(%rip),%rsi        # 0x7ffff7bcd600 <__quick_exit_funcs>
+	0x00007ffff78434b7 <+7>:     48 83 ec 08     sub    $0x8,%rsp
+	0x00007ffff78434bb <+11>:    31 d2   xor    %edx,%edx
+	0x00007ffff78434bd <+13>:    e8 4e fa ff ff  callq  0x7ffff7842f10 <__run_exit_handlers>
+	*/
+	void* quick_exit_handler = dlsym(RTLD_NEXT, "quick_exit");
+	ret = HookIt(quick_exit_handler, (void **)&quick_exit_f, (void *)quick_exit_call);
+	if (ret != FHSuccess) {
+		printf("hook quick_exit fail%d\n", ret);
+	}
+	// UnHook(quick_exit_handler, (void*)quick_exit_f);
 
-	typedef void(*functype)();
-	auto disas = [&](functype f, int sz)
-	{
-		uint8_t* readPointer = (uint8_t*)f;
-		ZydisDecodedInstruction instruction;
-		ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
-		uint64_t instructionPointer = (uint64_t)f;
-		while (ZYAN_SUCCESS(ZydisDecoderDecodeFull(
-			&decoder, readPointer, 128, &instruction, operands)))
-		{
-			char buffer[256];
-			ZydisFormatterFormatInstruction(
-				&formatter, &instruction, operands, instruction.operand_count,
-				buffer, sizeof(buffer), instructionPointer, nullptr);
-			printf("0x%p: %s\n", readPointer, buffer);
-			sz--;
-			if (sz <= 0)
-				break;
-			readPointer += instruction.length;
-			instructionPointer += instruction.length;
-		}
-		printf("==============================\n");
-	};
+	/*
+	Dump of assembler code for function __pthread_exit:
+	0x00007ffff791dea0 <+0>:     sub    $0x8,%rsp
+	0x00007ffff791dea4 <+4>:     mov    0x2b4886(%rip),%eax        # 0x7ffff7bd2730 <__libc_pthread_functions_init>
+	0x00007ffff791deaa <+10>:    test   %eax,%eax
+	0x00007ffff791deac <+12>:    jne    0x7ffff791deb5 <__pthread_exit+21>
+	*/
+	void* pthread_exit_handler = dlsym(RTLD_NEXT, "pthread_exit");
+	ret = HookIt(pthread_exit_handler, (void **)&pthread_exit_f, (void *)pthread_exit_call);
+	if (ret != FHSuccess) {
+		printf("hook pthread_exit fail%d\n", ret);
+	}
 
-	
-	auto runtest = [&](const char* name,functype target, functype* old, functype newfunc)
-	{
-		printf("==============================\n%s\n==============================\nBefore Hook:\n", name);
-		disas(target, 5);
-		auto ret = HookIt((void*)target, (void**)old, (void*)newfunc);
-		printf("Hook status=%d\n", ret);
-		if (ret == FHSuccess)
-		{
-			printf("After Hook:\n");
-			disas(target, 7);
-			printf("\nShadow Func:\n");
-			disas(*old, 10);
-		}
-	};
+	/*
+	Dump of assembler code for function endprotoent:
+	0x00007ffff7924ca0 <+0>:     48 83 3d 80 c7 2a 00 00 cmpq   $0x0,0x2ac780(%rip)        # 0x7ffff7bd1428 <startp>
+	0x00007ffff7924ca8 <+8>:     0f 84 b5 00 00 00       je     0x7ffff7924d63 <endprotoent+195>
+	*/
+	void* endprotoent_handler = dlsym(RTLD_NEXT, "endprotoent");
+	ret = HookIt(endprotoent_handler, (void **)&endprotoent_f, (void *)endprotoent_call);
+	if (ret != FHSuccess) {
+		printf("hook endprotoent fail%d\n", ret);
+	}
 
-	printf("main=%p\ntest_replace=%p\ntest_replace2=%p\n", main, test_replace, test_replace2);
+	/*
+	Dump of assembler code for function htons:
+	0x00007ffff79223a0 <+0>:     89 f8   mov    %edi,%eax
+	0x00007ffff79223a2 <+2>:     66 c1 c8 08     ror    $0x8,%ax
+	0x00007ffff79223a6 <+6>:     c3      retq
+	*/
+	// we must reject the hook of htons, because it is too small to be hooked
 
-	runtest("testfunc", testfunc, &poldfunc, test_replace);
-	runtest("testfunc2", testfunc2, &poldfunc2, test_replace2);
-	runtest("testfunc_lea", testfunc_lea, &poldfunc3, test_replace2);
-	runtest("testfunc_call", testfunc_call, &poldfunc4, test_replace2);
-	//test for dup hooks
-	runtest("testfunc_dup", test_dummy, &poldfunc5, test_replace_d);
-	runtest("testfunc_dup2", test_dummy, &poldfunc6, test_replace_d2);
-	runtest("testfunc_dup3", test_dummy, &poldfunc7, test_replace_d3);
-	test_dummy();
-	return 0;
+	quick_exit(0);
 }

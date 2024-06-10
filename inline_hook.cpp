@@ -1,3 +1,5 @@
+#include <cstddef>
+#include <cstdint>
 #include <string.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -5,12 +7,11 @@
 #include <sys/mman.h>
 #include "Zycore/String.h"
 #include "Zydis/Zydis.h"
-#include<fcntl.h>
+#include <fcntl.h>
 #include <limits.h>
 #include "PFishHook.h"
 #include <math.h>
-#include<sys/syscall.h>
-
+#include <sys/syscall.h>
 
 static size_t PageSize= 0;
 static ZydisFormatter formatter;
@@ -94,21 +95,21 @@ void GenerateJmp(char* pWriteTo, void* pTarget)
 /*
 Get the length of instructions to be gengerated by GenerateJmp()
 */
-int GetJmpLen(void* pWriteTo, void* pTarget)
+int GetJmpLenLarge()
 {
-	if (AddressDiff((char*)pWriteTo + 6, pTarget) < ((1ULL << 31) - 1))
-	{
-		return 5;
-	}
 	return 14;
 }
 
 /*
 Get the length of instructions to be gengerated by GenerateJmp()
 */
-int GetJmpLenLarge()
+int GetJmpLen(void* pWriteTo, void* pTarget)
 {
-	return 14;
+	if (AddressDiff((char*)pWriteTo + 6, pTarget) < ((1ULL << 31) - 1))
+	{
+		return 5;
+	}
+	return GetJmpLenLarge();
 }
 
 /*/////////////////////////////////////////////////////
@@ -197,37 +198,11 @@ static char* AllocFunc(size_t sz, void* addr)
 End Allocator definitions
 *//////////////////////////////////////////////////////
 
-enum PatchType
-{
-	FHPatchLoad32,
-	FHPatchJump8,
-};
-struct PatchInfo
-{
-	PatchType type;
-	int patch_addr_offset; //the offset of the address of the target to patch 
-};
-#define MAX_PATCH_POINTS 10
-
-
-inline bool InsertPatchPoint(PatchInfo* pool, int& num_patch_points, PatchType type, int offset)
-{
-	//alloacte a patch point info
-	if (num_patch_points >= MAX_PATCH_POINTS)
-		return true;
-	PatchInfo* pinfo = pool + num_patch_points;
-	num_patch_points++;
-
-	pinfo->type = type;// FHPatchLoad32;
-	pinfo->patch_addr_offset = offset;//(readPointer + len) - (uint8_t*)oldfunc;
-	return false;
-}
-
 #define FHASSERT(cond,pinst) do{\
 	if(!(cond)){\
 		fprintf(stderr, "PFishHook is unable to patch this instructions with RIP: %lx\n",\
 			*(uint64_t*)pinst);\
-		return FHUnrecognizedRIP;\
+		return FHPatchFailed;\
 	}\
 }while (0);
 
@@ -247,15 +222,35 @@ the "jump space" with "poutold". If success, return "FHSuccess"
 */
 HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_checking,void* suggested_address)
 {
-	int num_patch_points = 0;
-	static PatchInfo PatchInfoPool[MAX_PATCH_POINTS];
-
+/*
+                                        newfunc          
+                                        ^                
+                                        |  jmp           
+                                        |                
+                                      +-+------+ +------+
+                      oldfunc  ---->  | header | | body |
+                                      +--------+ +------+
+                                      |        |  ^      
+                                      |        |  |      
+                                      |        |  |      
++-----+------------+-----+------------+--------+  |      
+| len | new header | jmp | backup len | backup |  |      
++--1--+------------+-14--+-----1------+--------+  |      
+        ^             |                           |      
+        |             +---------------------------+      
+        |                                                
+        poutold                                          
+ */
+	if (oldfunc == nullptr) {
+		return FHDecodeFailed;
+	}
 	if (PageSize == 0)
 	{
 		PageSize = sysconf(_SC_PAGESIZE);
 		ZydisFormatterInit(&formatter, ZYDIS_FORMATTER_STYLE_INTEL);
 		ptrParseOperandMem = ParseOperandMem;
-		ZydisFormatterSetHook(&formatter, ZYDIS_FORMATTER_FUNC_FORMAT_OPERAND_MEM, (const void**)&ptrParseOperandMem);
+		ZydisFormatterSetHook(&formatter, ZYDIS_FORMATTER_FUNC_FORMAT_OPERAND_MEM,
+			(const void**)&ptrParseOperandMem);
 	}
 	ZydisDecoder decoder;
 	ZydisDecoderInit(
@@ -265,25 +260,37 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 	
 	uint64_t instructionPointer = (uint64_t)oldfunc;
 	uint8_t* readPointer = (uint8_t*)oldfunc;
-	size_t length = 0;
+	char length = 0;
 
-	int patch_jump_bed_size = 0;
 	//we first check the head of oldfunc. We use the disassembler to 
 	//find the length of each instruction until there is enough space
 	//to hold our "jmp" instructions
+	//FIXME:now, we dont have effective methods to get the length of oldfunc.
+	//from symbol-table?from debug info?
 	hasRIP = false;
 	ZydisDecodedInstruction instruction;
 	const int jmplen=GetJmpLen(oldfunc,newfunc);
-	uint8_t* QWORDPointer=nullptr;
 	ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
+	memset(operands, 0, sizeof(operands));
+	char* outfunc = AllocFunc(128, nullptr);
+	if (!outfunc)
+		return FHAllocFailed;
+	char* changeHeader = outfunc + 1;
 	while (ZYAN_SUCCESS(ZydisDecoderDecodeFull(
 		&decoder, readPointer, 128, &instruction, operands)))
 	{
-		bool patched = false;
 		if (instruction.attributes & ZYDIS_ATTRIB_IS_RELATIVE)
 		{
-			FHASSERT(instruction.operand_count >= 1, instructionPointer);
-			for (int i = 0; i < instruction.operand_count; i++) //for all operands, check if it is RIP-relative
+			bool farJump = false;
+			ZydisEncoderRequest req;
+			memset(&req, 0, sizeof(req));
+			if(!ZYAN_SUCCESS(ZydisEncoderDecodedInstructionToEncoderRequest(&instruction, operands,
+				instruction.operand_count_visible, &req)))
+			{
+				return FHEncodeFailed;
+			}
+			FHASSERT(instruction.operand_count_visible >= 1, instructionPointer);
+			for (int i = 0; i < instruction.operand_count_visible; i++) //for all operands, check if it is RIP-relative
 			{
 				auto operand = &operands[i];
 				if (operand->type == ZYDIS_OPERAND_TYPE_MEMORY && operand->mem.disp.has_displacement)
@@ -291,24 +298,19 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 					FHASSERT(operand->mem.base != ZYDIS_REGISTER_EIP, instructionPointer);
 					if (operand->mem.base == ZYDIS_REGISTER_RIP)
 					{
+						req.operands[i].mem.displacement = operand->mem.disp.value - (uint64_t)changeHeader + instructionPointer;
 						FHASSERT(instruction.raw.disp.size == 32, instructionPointer);
-						patched = true;
 						/*
 						NOTE: We might meet jmp QWORD PTR [rip].While this instr reads mem at rip+6 (we will modify this address),
 						we should copy QWORD rip+6 to shadow function
 						 */
 						auto pOffset=(int32_t*)(readPointer + instruction.raw.disp.offset);
 						auto word_offset=(readPointer + *pOffset) - (uint8_t*)oldfunc+instruction.length;
-						//printf("off %d\n",*pOffset);
 						//jmpq QWORD ptr [rip+0] (6) QWORD (8)
 						if(word_offset<jmplen && instruction.mnemonic>=ZYDIS_MNEMONIC_JB && instruction.mnemonic<=ZYDIS_MNEMONIC_JZ){
 							//Uhh We should copy this word to shadow function
 							//In most cases,This only happen when a function is hooked
-							FHASSERT(QWORDPointer==nullptr, instructionPointer);
-							QWORDPointer=readPointer+(*pOffset)+instruction.length;
-						}else{
-						if (InsertPatchPoint(PatchInfoPool, num_patch_points, FHPatchLoad32, (readPointer + instruction.raw.disp.offset) - (uint8_t*)oldfunc))
-							return FHTooManyPatches;
+							farJump = true;
 						}
 					}
 				}
@@ -316,125 +318,51 @@ HookStatus HookItSafe(void* oldfunc, void** poutold, void* newfunc, int need_che
 				{
 					if (operand->imm.is_signed && operand->imm.is_relative)
 					{
-						if (instruction.raw.imm[0].size == 8)
-						{
-							patched = true;
-							if (InsertPatchPoint(PatchInfoPool, num_patch_points, FHPatchJump8,
-								(readPointer + instruction.raw.imm[0].offset) - (uint8_t*)oldfunc))
-								return FHTooManyPatches;
-							//if there is a jmp instruction, we need one more "jmp" in
-							//our jump space to patch it, so add alloc_size with GetJmpLen()
-							patch_jump_bed_size += GetJmpLenLarge();
+						// the jmp range in the oldfunc usually small. when we copy instruction to jump chunk, we need a far jmp
+						// if the jump range is larger than 32-bit, encode func will return FHEncodeFailed
+						if (req.mnemonic != ZYDIS_MNEMONIC_CALL) {// jmp rel32
+							req.branch_width = ZYDIS_BRANCH_WIDTH_32;
+							req.branch_type = ZYDIS_BRANCH_TYPE_NEAR;
 						}
-						else if (instruction.raw.imm[0].size == 32)
-						{
-							patched = true;
-							if (InsertPatchPoint(PatchInfoPool, num_patch_points, FHPatchLoad32,
-								(readPointer + instruction.raw.imm[0].offset) - (uint8_t*)oldfunc))
-								return FHTooManyPatches;
-						}
-						else
-						{
-							FHASSERT(0, instructionPointer);
-						}
+						req.operands[i].imm.s = operand->imm.value.s - (uint64_t)changeHeader + instructionPointer;
 					}
 				}
-			}	
-			FHASSERT(patched, instructionPointer);
-		}
-		if(readPointer+instruction.length==QWORDPointer){
-			instruction.length+=8;
-			//skip the QWORD
+			}
+			ZyanU8 encoded_instruction[ZYDIS_MAX_INSTRUCTION_LENGTH];
+			ZyanUSize encoded_length = sizeof(encoded_instruction);
+			memset(encoded_instruction, 0, sizeof(encoded_instruction));
+			if(!ZYAN_SUCCESS(ZydisEncoderEncodeInstruction(&req, encoded_instruction, &encoded_length)))
+			{
+				return FHEncodeFailed;
+			}
+			memcpy(changeHeader, encoded_instruction, encoded_length);
+			changeHeader += encoded_length;
+			if(farJump)
+			{
+				memcpy(changeHeader, changeHeader, 8);
+				changeHeader += 8;
+				instruction.length+=8;
+			}
+		} else {
+			memcpy(changeHeader, readPointer, instruction.length);
+			changeHeader += instruction.length;
 		}
 		readPointer += instruction.length;
+		instructionPointer += instruction.length;
 		length += instruction.length;
 		if (length >= jmplen)
 			break;
-		instructionPointer += instruction.length;
 	}
-	if (length < jmplen)
-		return FHDecodeFailed;
-
-	//now "length" is the length of instructions in oldfunc to be replaced
-	/*
-	The jump space is composed of
-		- oldfunc's replaced function head (with length "length")
-		- the "jmp" instruction jumping to the body of oldfunc
-	Also, we need to remember the alloc_size 
-	*/
-	size_t alloc_size = length + GetJmpLenLarge() + sizeof(size_t) + patch_jump_bed_size;
-
-	char* outfunc = AllocFunc(alloc_size, suggested_address);
-	if (!outfunc)
-		return FHAllocFailed;
-
-	//record the length of replaced instructions
-	*(size_t*)outfunc = length;
-	outfunc += sizeof(size_t);
-	//copy oldfunc's first several instructions to the jump space
-	memcpy(outfunc, oldfunc, length);
+	*poutold = (void*)(outfunc + 1);
+	//now, we need to update the length of changed header
+	*outfunc = changeHeader - (char*)*poutold;
 	//generate a "jmp" back to oldfunc's body
-	GenerateJmpLarge(outfunc + length,(char*)oldfunc+length);
+	GenerateJmpLarge(outfunc + length + 1,(char*)oldfunc+length);
+	changeHeader += GetJmpLenLarge();
+	// backup old header for restoring old function in the future
+	*changeHeader = length;
+	memcpy(changeHeader + 1, oldfunc, length);
 
-	//now get each PatchInfo and do patching in the copied function head
-	int jump_bed_num = 0;
-	for (int i = 0; i < num_patch_points; i++)
-	{
-		switch (PatchInfoPool[i].type)
-		{
-		case FHPatchLoad32:
-			//if there is a 32-bit relative instr
-			int32_t offset; offset = *(int32_t*)((unsigned char*)oldfunc + PatchInfoPool[i].patch_addr_offset);
-			//calculate the new relative offset
-			int64_t delta; delta = (int64_t)offset - ((char*)outfunc - (char*)oldfunc);
-			if (delta > INT_MAX || delta < INT_MIN)
-			{
-				//if the relative offset is too large to be held in 32 bits
-				//we retry with a suggested address. If there is already a 
-				//suggested address, return failure.
-				if(suggested_address)
-					return FHPatchFailed;
-				return HookItSafe(oldfunc, poutold, newfunc, need_checking, oldfunc);
-			}
-			//the patch point in copied function
-			int32_t* patch_point;patch_point = (int32_t*)(outfunc + PatchInfoPool[i].patch_addr_offset);
-			*patch_point = delta;
-			break;
-		case FHPatchJump8:
-			//if there is a jne "near" relative instr, the offset is too small to
-			//jump from jump space to oldfun's body. So we first "jne near" to a place
-			//in jump space, and then use our "far jmp" to jump to the target
-			unsigned char* patch_addr_jne; // the address of the instruction in old function
-			patch_addr_jne = (unsigned char* )oldfunc + PatchInfoPool[i].patch_addr_offset - 1;
-			//the address of the instruction in new function
-			char* patch_instruction; patch_instruction = (char*)(outfunc + PatchInfoPool[i].patch_addr_offset - 1);
-			uintptr_t target; target = (uintptr_t)patch_addr_jne + 2 + patch_addr_jne[1];
-
-			//check if the jump target is within the copied part of the function. If so, no need to patch
-			int jump_target_offset; jump_target_offset = (char*)target - (char*)oldfunc;
-			if (jump_target_offset >= 0 && jump_target_offset < length)
-				continue;
-			/*where should we jump to now?
-			remember the layout of the jump space:
-			[copied function head]                     ----  length= "length"
-			[a "jmp" instruction to original function] ----  length= "GetJmpLen()"
-			[several "jmp" instructions to handle near jmp(s)]
-			*/
-			int delta8;
-			delta8 = outfunc + length + GetJmpLenLarge() + jump_bed_num * GetJmpLenLarge() - (patch_instruction + 2);
-			if (delta8 > 127 || delta8 < -128)
-			{
-				return FHPatchFailed;
-			}
-			patch_instruction[1] = delta8;
-			
-			char* jmp_bed = outfunc + length + GetJmpLenLarge()+ jump_bed_num * GetJmpLenLarge();
-			GenerateJmpLarge(jmp_bed, (void*)target);
-			jump_bed_num++;
-		}
-	}
-
-	*poutold = (void*)outfunc;
 	//Let the pages of oldfunc writable
 	if(RangeProtect(oldfunc,length,1)!=FHSuccess) return FHMprotectFail;
 	//replace the head of oldfunc with newfunc
@@ -449,12 +377,15 @@ HookStatus HookIt(void* oldfunc, void** poutold, void* newfunc)
 {
 	return HookItSafe(oldfunc, poutold, newfunc, 1,nullptr);
 }
-HookStatus UnHook(void* oldfunc, void* func)
+HookStatus UnHook(void* oldfunc, void* poutold)
 {
-	//todo : reset patch
-	size_t length = *((size_t*)func - 1);
+	//see HookItSafe for jump func memory layout
+	char* outfunc = (char*)poutold;
+	int8_t length = *(outfunc - 1);
+	outfunc += length + GetJmpLenLarge();
+	length = *outfunc;
 	if(RangeProtect(oldfunc,length,1)!=FHSuccess) return FHMprotectFail;
-	memcpy(oldfunc,func,length);
+	memcpy(oldfunc,outfunc + 1,length);
 	if(RangeProtect(oldfunc,length,0)!=FHSuccess) return FHMprotectFail;
 	return FHSuccess;
 }

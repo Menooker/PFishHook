@@ -7,8 +7,7 @@ enum HookStatus
 	FHMprotectFail,
 	FHAllocFailed,
 	FHPatchFailed,
-	FHTooManyPatches,
-	FHUnrecognizedRIP,
+	FHEncodeFailed,
 };
 
 #ifdef __cplusplus 
