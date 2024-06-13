@@ -14,5 +14,5 @@ include_directories(
 add_library(${LIB_NAME} inline_hook.cpp)
 target_link_libraries(${LIB_NAME} Zydis)
 add_dependencies(${LIB_NAME} Zydis)
-add_executable(hooker-test hooktest.cpp)
-target_link_libraries(hooker-test ${LIB_NAME} Zydis)
+add_executable(hook-test hooktest.cpp)
+target_link_libraries(hook-test ${LIB_NAME} Zydis)
