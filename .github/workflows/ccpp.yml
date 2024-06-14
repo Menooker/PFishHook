@@ -1,0 +1,21 @@
+name: C/C++ CI
+
+on:
+  push:
+    branches:
+    - master
+  pull_request:
+
+jobs:
+  test-linux:
+    runs-on: ubuntu-20.04
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        submodules: recursive
+    - name: make
+      working-directory: ./
+      run: mkdir build && cd build && cmake .. && cmake --build . --target hook-test --config Release -- -j
+    - name: test
+      working-directory: ./
+      run: ./build/hook-test

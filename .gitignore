@@ -6,3 +6,4 @@ include/*
 hooktest
 3rdparty/*
 build/*
+.vscode/*

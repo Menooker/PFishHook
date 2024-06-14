@@ -165,13 +165,16 @@ static MemChunk* TryCreateChunk(void* address){
 	}
 	if(((uintptr_t)addr >> 32) == 0 && addr!=0) flags|= MAP_32BIT;
 	const uintptr_t search_step=(MCHUNK_SZ<<1);
-	for(;addr>search_step;addr-=search_step){
-		MemChunk* res=(MemChunk*)mmap(addr, MCHUNK_SZ, PROT_READ | PROT_WRITE | PROT_EXEC,flags,-1,0);
+	for(auto tryaddr = addr;;tryaddr-=search_step){
+		MemChunk* res=(MemChunk*)mmap(tryaddr, MCHUNK_SZ, PROT_READ | PROT_WRITE | PROT_EXEC,flags,-1,0);
 		if(ADDR_OK(res,reinterpret_cast<void*>(addr))){
 			res->init();
 			return res;
 		}
 		munmap(res,MCHUNK_SZ);
+		if(tryaddr<search_step) {
+			break;
+		}
 	}
 	return nullptr;
 }
